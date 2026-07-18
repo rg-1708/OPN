@@ -62,6 +62,8 @@ async fn main() {
         .expect("install metrics recorder");
     observe::register_metrics();
 
+    let s3 = Arc::new(opn_core::infra::s3::S3::new(&cfg).expect("build s3 client"));
+
     let state = AppState {
         pg,
         redis,
@@ -69,6 +71,7 @@ async fn main() {
         limits: Arc::new(opn_core::infra::ratelimit::RateLimitTable::default()),
         preauth: Arc::new(opn_core::gateway::ws::PreauthCaps::default()),
         tenants: Arc::new(opn_core::infra::tenant_cache::TenantCache::default()),
+        s3,
         cfg: Arc::new(cfg),
     };
 

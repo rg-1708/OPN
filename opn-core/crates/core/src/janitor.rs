@@ -27,6 +27,8 @@ pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
             run_task("expired_sessions", expired_sessions(&state.pg)).await;
             run_task("retired_numbers_sweep", retired_numbers_sweep(&state.pg)).await;
             run_task("message_partition", ensure_next_partition(&state.pg)).await;
+            run_task("media_pending_reap", media_reap(&state)).await;
+            run_task("media_verify", media_verify(&state)).await;
             // In-process, no DB: buckets idle > 10 min go away (§12).
             run_task("ratelimit_sweep", async { Ok(state.limits.sweep_idle()) }).await;
         }
@@ -90,6 +92,33 @@ pub async fn retired_numbers_sweep(pool: &PgPool) -> Result<u64> {
         "DELETE FROM retired_numbers WHERE freed_at < now() - interval '30 days'",
     )
     .await
+}
+
+/// Media pending-reap across every world (§10.6): each world's sweep does S3
+/// DeleteObject calls after its DB delete, so it can't ride the SQL-only
+/// `sweep_worlds` — it walks worlds itself, delegating to the media primitive.
+async fn media_reap(state: &AppState) -> Result<u64> {
+    let world_ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM worlds")
+        .fetch_all(&state.pg)
+        .await?;
+    let mut total = 0u64;
+    for world_id in world_ids {
+        total += crate::primitives::media::reap_pending(state, world_id).await?;
+    }
+    Ok(total)
+}
+
+/// Media live-verification across every world (§10.6): HEADs objects, reverts
+/// cap-bypassers/missing to `pending`. Same per-world walk as `media_reap`.
+async fn media_verify(state: &AppState) -> Result<u64> {
+    let world_ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM worlds")
+        .fetch_all(&state.pg)
+        .await?;
+    let mut total = 0u64;
+    for world_id in world_ids {
+        total += crate::primitives::media::verify_live(state, world_id).await?;
+    }
+    Ok(total)
 }
 
 /// Stopgap `messages` partition maintenance (roadmap Sprint 3 item 2): create

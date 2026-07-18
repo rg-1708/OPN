@@ -44,6 +44,12 @@ fn every_cmd_names_its_covering_test() {
             Cmd::ChannelsMemberRemove { .. } => {
                 "channels_members_resume::member_remove_drops_subscription"
             }
+            Cmd::MediaRequestUpload { .. } => {
+                "media::request_upload_commit_roundtrip, media::caps_enforced"
+            }
+            Cmd::MediaCommit { .. } => {
+                "media::request_upload_commit_roundtrip, media::commit_foreign_forbidden"
+            }
             Cmd::NotifySeen { .. } => "notify::seen_marks_rows",
             Cmd::NotifyClear => "notify::clear_empties_inbox",
         }

@@ -10,6 +10,7 @@ use crate::state::AppState;
 
 pub mod auth;
 pub mod channels;
+pub mod media;
 pub mod notify;
 pub mod tenant;
 
@@ -19,6 +20,7 @@ pub fn app_router(state: AppState) -> Router {
         .route("/ws", get(crate::gateway::ws::ws_handler))
         .route("/v1/tenants/self/sessions", post(tenant::mint_session))
         .route("/v1/notify/inbox", get(notify::inbox))
+        .route("/v1/media", get(media::list))
         .route("/v1/channels/{id}/messages", get(channels::history))
         .with_state(state)
 }

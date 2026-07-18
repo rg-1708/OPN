@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use uuid::Uuid;
 
-use crate::types::MessageBody;
+use crate::types::{MediaKind, MessageBody};
 
 /// Every client→server command. Serde does the routing, `match` does the
 /// dispatch, the compiler does the exhaustiveness (OPN-CORE.md §7).
@@ -139,6 +139,26 @@ pub enum Cmd {
     ChannelsMemberRemove {
         channel_id: Uuid,
         character_id: Uuid,
+    },
+
+    // ── media (§10.6) ────────────────────────────────────────────────────
+    /// Request a presigned upload (§10.6): validates the kind/mime pair and the
+    /// size cap, inserts a `pending` row, and returns S3 POST policies (one for
+    /// the original, one for the thumb on photo/video). The policy's
+    /// `content-length-range` makes the cap MinIO-enforced, not advisory
+    /// (OPN.md §7.2). `commit` promotes to `live`.
+    #[serde(rename = "media.request_upload")]
+    MediaRequestUpload {
+        kind: MediaKind,
+        #[ts(type = "number")]
+        bytes: i64,
+        mime: String,
+    },
+    /// Promote the caller's own `pending` upload to `live` (§10.6). Owner-checked;
+    /// no synchronous HEAD — the janitor verifies the object out of band (§17.3).
+    #[serde(rename = "media.commit")]
+    MediaCommit {
+        media_id: Uuid,
     },
 
     // ── notify (§10.8) ───────────────────────────────────────────────────

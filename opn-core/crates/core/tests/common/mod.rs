@@ -73,6 +73,7 @@ pub fn test_config() -> Config {
         s3_bucket: String::new(),
         s3_key: String::new(),
         s3_secret: String::new(),
+        s3_region: "us-east-1".into(),
         jwt_secret: "test".into(),
         session_ttl_secs: 600,
         replicas: 1,
@@ -91,6 +92,7 @@ pub async fn test_state(pg: PgPool, cfg: Config) -> AppState {
     let redis = redis::aio::ConnectionManager::new(client)
         .await
         .expect("redis connect (dev stack up?)");
+    let s3 = Arc::new(opn_core::infra::s3::S3::new(&cfg).expect("build s3 client"));
     AppState {
         pg,
         redis,
@@ -98,6 +100,7 @@ pub async fn test_state(pg: PgPool, cfg: Config) -> AppState {
         limits: Arc::new(opn_core::infra::ratelimit::RateLimitTable::default()),
         preauth: Arc::new(opn_core::gateway::ws::PreauthCaps::default()),
         tenants: Arc::new(opn_core::infra::tenant_cache::TenantCache::default()),
+        s3,
         cfg: Arc::new(cfg),
     }
 }

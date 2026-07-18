@@ -6,6 +6,154 @@ to OPN-CORE.md as CDRs — this file records *how the build actually went*.
 
 ---
 
+## 2026-07-18 (night, latest) — Sprint 5 **part A** (media: presigned uploads + janitor verify + gallery + attachment un-gate): built, verified live against MinIO; directory (part B) deferred
+
+Same pacing move as Sprint 4: Sprint 5 has two disjoint halves — **(A)** media
+(schema, presigned POST uploads, commit, janitor pending-reap + live
+verification, gallery, and un-gating the channels attachment check) and **(B)**
+directory (contacts, blocks, `resolve` upgrade, listings, block enforcement at
+`open_direct`). They share no tables and no code, so A shipped and stopped here.
+No roadmap amendment — items 7–8 stay in Sprint 5.
+
+### What exists now
+
+- **Migration `0007_media.sql`** — one `media` table with a `pending → live`
+  lifecycle, `verified_at` (NULLS-FIRST verify cursor), `has_thumb`, and the
+  0001 NULLIF world-isolation convention. Three partial indexes: owner-live
+  gallery `(owner_character, created_at DESC, id DESC)`, verify cursor
+  `(world_id, verified_at NULLS FIRST, id)`, pending-reap `(created_at)`.
+- **`infra/s3.rs`** — a hand-rolled minimal S3 client, no SDK. One AWS4
+  signing-key HMAC chain feeds two surfaces: **presigned POST policies** (the
+  `content-length-range` is what makes the size cap MinIO-enforced, not
+  advisory) and **query-signed presigned URLs** (GET for the gallery, HEAD/
+  DELETE for the janitor, executed with `reqwest`). Path-style throughout →
+  MinIO-native. Unit-tested against an independently-computed signing-key vector
+  *and* proven by real MinIO accepting every upload/GET/HEAD.
+- **`primitives/media.rs`** — `request_upload` (kind/mime/cap validation →
+  pending row → POST policies, original + thumb for photo/video), `commit`
+  (owner-scoped `pending → live`), `all_owned_live` (the attachment gate),
+  `list` (own live gallery, cursor idiom, fresh presigned GETs per row), and the
+  two janitor helpers `reap_pending` + `verify_live` (concurrent HEADs via
+  `buffer_unordered(16)`, revert cap-bypassers/missing to pending).
+- **`media.request_upload` / `media.commit`** wired through dispatch (+ rate
+  classes: request_upload → `Expensive`, commit → `Social`); **`GET /v1/media`**
+  gallery route; three new contracts types (`MediaKind`, `UploadTicket` /
+  `UploadTarget`, `MediaItem`) exported to bindings.
+- **Channels attachment check un-gated** (Sprint 3 item 3 → Sprint 5 item 6):
+  `validate_body` no longer hard-rejects `media_ids`; `send` now calls
+  `media::all_owned_live` and forbids any attachment that isn't a live row owned
+  by the sender. The stale `media_gated_off_until_sprint5` unit test became
+  `media_passes_shape_validation`.
+- **Two new janitor tasks** (`media_pending_reap`, `media_verify`) on the 30 s
+  tick, each walking worlds and doing S3 calls after their SQL.
+
+### Decisions closed during implementation (roadmap deviations, all ponytail)
+
+1. **No S3 SDK — hand-rolled SigV4.** The roadmap said "use aws-sdk-s3, don't
+   hand-roll SigV4," believing the SDK does presigned POST. It does not (that's
+   boto3/JS, not the Rust SDK) — so the POST *policy* signature is hand-rolled
+   no matter what. Given that, and a large SDK tree on a RAM-constrained host,
+   the lazy path was one HMAC chain feeding both POST policies and presigned
+   GET/HEAD/DELETE, with `reqwest` (rustls already in-tree) as the only new
+   runtime dep. The "don't hand-roll" caution is answered by a pinned signing-key
+   vector plus live MinIO round-trips, not by a heavier dependency.
+2. **`aws-sdk-s3` size beat correctness anyway.** Even for the janitor's
+   HEAD/DELETE, presigned-URL-then-`reqwest` reuses the same signer — no request
+   header-signing code, no SigV4 canonicalization beyond one query string.
+3. **Foreign commit → `forbidden`, unknown → `not_found`.** The happy `UPDATE …
+   RETURNING` collapses both to zero rows; only the failure path runs a second
+   RLS-scoped existence probe to split them. Matches the roadmap test wording;
+   media ids are unguessable so leaking "exists" costs nothing.
+4. **Thumb pinned to `image/jpeg`, small cap.** A POST policy must condition on
+   `Content-Type` (S3 rejects un-conditioned form fields), so the thumb target
+   fixes one shape rather than mirror the original kind. `ponytail:` marked.
+5. **Verify releases the advisory lock before the HEADs.** Holding a DB
+   transaction across ≤500 network HEADs would tie up a pool connection; instead
+   read-batch commits, HEADs run lock-free, a second tx applies results. Two
+   concurrent janitors at worst re-HEAD a batch — wasteful, never wrong (updates
+   idempotent, rule 7 holds).
+6. **Deferred, explicitly, to part B or later:** `media.favourite` (object
+   tagging is the one awkward S3 op — PUT `?tagging` with body hash); the
+   `expired` tombstone state (a lifecycle-deleted object currently reverts to
+   pending → reap deletes the row, so galleries lose it rather than tombstone
+   it). Neither blocks any Sprint 5 exit criterion.
+
+### The keeper this session (the point of rule 4)
+
+**The SigV4 unit test failed while every live MinIO test passed** — and the
+*test* was wrong, not the code. I'd hardcoded `c4afb1cc…` as the expected
+signing key from memory; the real canonical key for that AWS example is
+`2c94c0cf…` (`c4afb1cc…` is a *signature* from a different example, not a
+signing key). MinIO accepting real uploads/GETs/HEADs was the independent proof
+the derivation was right; an out-of-band `hmac`+`hashlib` chain confirmed the
+value before I changed the constant. Lesson: a self-check pinned to a
+half-remembered constant can fail *against correct code* — cross-check the
+fixture against something that isn't your memory. The live integration is what
+told me which of the two was lying.
+
+### Verification (rule 4)
+
+- `cargo build` + `cargo clippy --all-targets -- -D warnings` clean; `cargo fmt
+  --check` clean.
+- Full suite green across every binary. New `tests/media.rs` (4 tests, live
+  MinIO from the dev stack) proves each exit criterion:
+  - `request_upload_commit_roundtrip`: request → real multipart POST to MinIO →
+    commit → appears in `GET /v1/media` → **bytes fetched back through the
+    presigned GET match** → attaches to a `channels.send`; an unowned id on the
+    same send is `forbidden`.
+  - `caps_enforced`: over-cap/bad-mime rejected by Core pre-S3; an over-range
+    POST **rejected by MinIO itself** (4xx from the policy, not Core).
+  - `commit_foreign_forbidden`: other-owner commit → `forbidden`, unknown →
+    `not_found`.
+  - `verify_reverts_cap_bypass`: a bigger object uploaded through a forged laxer
+    policy is **caught by the verify HEAD and reverted to pending** — the cap
+    bypass provably fails.
+- SigV4 signing-key unit test pinned to the verified vector.
+
+### Exit criteria status (Sprint 5)
+
+| Criterion | Status |
+|---|---|
+| Photo round-trips dev-stack (request → upload → commit → list → attach → presigned GET), scripted in-repo | **PASS** — `request_upload_commit_roundtrip`. |
+| Verification sweep provably catches a cap bypass | **PASS** — `verify_reverts_cap_bypass`. |
+| All media/directory commands in coverage match-test; HTTP routes in route-coverage test | **PARTIAL** — media commands + `/v1/media` covered; directory commands land in part B. |
+
+### Reflection
+
+- **Splitting on the table seam worked a second time.** Media and directory
+  share nothing, so part A is a complete, reviewed, green vertical slice and
+  part B starts from a clean base. Same dividend Sprint 4 paid.
+- **The roadmap's library call was wrong, and finding that out early was
+  cheap.** Two minutes checking "does the Rust SDK do presigned POST" (it
+  doesn't) saved a large dependency and a wrong mental model. The roadmap is a
+  plan, not a spec — deviating with a one-line reason in the log is the system
+  working.
+- **Groundwork from Sprint 0 paid off.** MinIO + bucket were already in compose,
+  S3 config already in `Config`/`.env.example` — so this session added no infra
+  scaffolding, only the client and the primitive.
+- **Not committed.** The pile is now five-and-a-half sprints tall and still
+  untracked. Every session this stays the one highest-leverage undone thing: it
+  arms the drift gate (now with four new binding files) and unblocks Sprint 4's
+  three-night smoke.
+
+### Next session
+
+1. **The first push** — unchanged and still on the critical path: arms the
+   contracts drift gate (Cmd/ClientFrame changed, four media `.ts` files added)
+   and Sprint 4's three-night perf smoke.
+2. **Sprint 5 part B — directory.** contacts CRUD, blocks, the `resolve`
+   upgrade (blocked pair → `None`, indistinguishable from unknown), listings
+   with janitor expiry, and block enforcement at `channels.open_direct` (both
+   directions → `not_found`-equivalent). Then the coverage match-test closes on
+   the directory commands.
+3. **Media loose ends (small, non-blocking):** `media.favourite` + object
+   tagging; the `expired` tombstone state so galleries render tombstones instead
+   of dropping lifecycle-expired rows.
+4. Still open from before: online-member badging, Bearer case-sensitivity,
+   `identity.me` own-last-seen.
+
+---
+
 ## 2026-07-18 (night, later) — CI armed by the first push, and caught a migration role-race on run one
 
 The first push finally happened (burning down Sprint 0's CI/drift-gate criterion,

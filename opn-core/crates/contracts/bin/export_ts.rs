@@ -19,5 +19,9 @@ fn main() {
     contracts::InboxItem::export_all_to(dir).expect("export InboxItem");
     // History rides HTTP, not the Cmd/Evt graph.
     contracts::MessageItem::export_all_to(dir).expect("export MessageItem");
+    // media: request_upload ack and the gallery row (UploadTarget rides along
+    // as a dependency of UploadTicket).
+    contracts::UploadTicket::export_all_to(dir).expect("export UploadTicket");
+    contracts::MediaItem::export_all_to(dir).expect("export MediaItem");
     println!("bindings written to {dir}");
 }

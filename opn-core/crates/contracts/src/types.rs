@@ -157,3 +157,55 @@ pub struct InboxItem {
     pub seen_at: Option<String>,
     pub created_at: String,
 }
+
+// ── media (OPN-CORE.md §10.6) ────────────────────────────────────────────────
+
+/// Upload kind (§10.6): fixes the MIME allowlist, the size cap, and whether a
+/// thumbnail target is issued (photo/video yes, audio no).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum MediaKind {
+    Photo,
+    Video,
+    Audio,
+}
+
+/// One presigned S3 POST target (§10.6). The client POSTs a multipart form to
+/// `url` with every entry of `fields` plus a trailing `file` part — nothing
+/// else. The cap is MinIO's, enforced by the policy inside `fields`, so a
+/// cheating client cannot lift it.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UploadTarget {
+    /// `original` or `thumb`.
+    pub role: String,
+    pub url: String,
+    #[ts(type = "Record<string, string>")]
+    pub fields: serde_json::Value,
+}
+
+/// `media.request_upload` ack (§10.6): the new media id and one or two POST
+/// targets (thumb present for photo/video).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UploadTicket {
+    pub media_id: Uuid,
+    pub targets: Vec<UploadTarget>,
+}
+
+/// One gallery row (`GET /v1/media`, §10.6). `url`/`thumb_url` are short-lived
+/// presigned GETs — the client fetches bytes straight from S3, never via Core.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct MediaItem {
+    pub media_id: Uuid,
+    pub kind: MediaKind,
+    pub mime: String,
+    #[ts(type = "number")]
+    pub bytes: i64,
+    pub url: String,
+    #[ts(type = "string | null")]
+    pub thumb_url: Option<String>,
+    pub created_at: String,
+}

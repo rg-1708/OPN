@@ -65,7 +65,12 @@ pub fn class_of(cmd: &contracts::Cmd) -> Class {
         | Cmd::ChannelsUnpin { .. }
         | Cmd::ChannelsMemberAdd { .. }
         | Cmd::ChannelsMemberRemove { .. }
+        // A commit is a cheap owner-scoped UPDATE; social-rate is plenty.
+        | Cmd::MediaCommit { .. }
         | Cmd::NotifyClear => Class::Social,
+        // Issuing a presigned upload signs policies and reserves a row — the
+        // costliest command that isn't the hot path. Tight budget (§12).
+        Cmd::MediaRequestUpload { .. } => Class::Expensive,
         // The hot path — its own class with a message-rate budget (§12).
         Cmd::ChannelsSend { .. } => Class::Msg,
     }

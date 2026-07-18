@@ -7,6 +7,7 @@ use contracts::ErrCode;
 pub mod channels;
 pub mod directory;
 pub mod identity;
+pub mod media;
 pub mod notify;
 
 /// Handler failure: a deliberate protocol error (acked with its code) or an

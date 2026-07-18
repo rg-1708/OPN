@@ -19,6 +19,9 @@ pub struct Config {
     pub s3_bucket: String,
     pub s3_key: String,
     pub s3_secret: String,
+    /// SigV4 region label. MinIO ignores it but still requires it in the
+    /// signature scope; real S3 needs the bucket's region.
+    pub s3_region: String,
     pub jwt_secret: String,
     pub session_ttl_secs: u64,
     /// >1 enables the Redis pub/sub fan-out path.
@@ -70,6 +73,7 @@ impl Config {
             s3_bucket: req("S3_BUCKET")?,
             s3_key: req("S3_KEY")?,
             s3_secret: req("S3_SECRET")?,
+            s3_region: std::env::var("S3_REGION").unwrap_or_else(|_| "us-east-1".into()),
             jwt_secret: req("OPN_JWT_SECRET")?,
             session_ttl_secs: match std::env::var("OPN_SESSION_TTL_SECS") {
                 Ok(v) => parse("OPN_SESSION_TTL_SECS", v)?,

@@ -15,9 +15,12 @@ jsonwebtoken = "9"
 rand = "0.9"
 sha2 = "0.10"
 contracts = { path = "../contracts" }
+hex = "0.4"
+hmac = "0.12"
 metrics = "0.24.6"
 metrics-exporter-prometheus = "0.18.3"
 redis = { version = "1.4.1", default-features = false, features = ["tokio-comp", "connection-manager"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 serde.workspace = true
 serde_json.workspace = true
 smallvec = "1"
@@ -32,6 +35,7 @@ uuid.workspace = true
 workspace = true
 
 [dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "multipart"] }
 tokio-tungstenite = "0.28"
 tower = { version = "0.5.3", features = ["util"] }
 url = "2.5.8"

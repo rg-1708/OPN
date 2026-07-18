@@ -57,6 +57,13 @@ pub async fn send(
     body: &MessageBody,
 ) -> Result<serde_json::Value, Fail> {
     validate_body(body)?;
+    // Attachment gate (roadmap Sprint 5 item 6, un-gating Sprint 3 item 3):
+    // every attached media id must be a live row owned by the sender.
+    if let Some(ids) = body.media_ids.as_ref().filter(|m| !m.is_empty()) {
+        if !super::media::all_owned_live(state, who, ids).await? {
+            return Err(Fail::Code(ErrCode::Forbidden));
+        }
+    }
     let body_json = serde_json::to_value(body).map_err(|e| Fail::Internal(e.into()))?;
 
     let out = store::send_message(
@@ -420,14 +427,8 @@ fn validate_body(body: &MessageBody) -> Result<(), Fail> {
     if !(has_text || has_media || has_gif) {
         return Err(Fail::Code(ErrCode::Invalid));
     }
-
-    // Attachment authz gate (roadmap Sprint 3 item 3): the media table does
-    // not exist until Sprint 5, so no media id can be a live, owned row —
-    // any attachment is unverifiable and therefore forbidden. Sprint 5 item 6
-    // un-gates this into the real owned+live count check.
-    if has_media {
-        return Err(Fail::Code(ErrCode::Forbidden));
-    }
+    // Media ownership is validated asynchronously in `send` (needs the DB); this
+    // sync check is shape/size only. See `media::all_owned_live`.
 
     if let Some(url) = body.gif_url.as_deref() {
         if !url.is_empty() && !gif_host_allowed(url) {
@@ -485,11 +486,10 @@ mod tests {
     }
 
     #[test]
-    fn media_gated_off_until_sprint5() {
-        assert!(matches!(
-            validate_body(&body(None, None, Some(vec![Uuid::now_v7()]))),
-            Err(Fail::Code(ErrCode::Forbidden))
-        ));
+    fn media_passes_shape_validation() {
+        // Sprint 5: a media-only body is now shape-valid; ownership (live +
+        // owned-by-sender) is checked asynchronously in `send`, not here.
+        assert!(validate_body(&body(None, None, Some(vec![Uuid::now_v7()]))).is_ok());
     }
 
     #[test]

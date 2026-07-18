@@ -16,7 +16,7 @@ use super::registry::ConnHandle;
 use super::topic::TopicKind;
 use crate::infra::auth::mint_jwt;
 use crate::infra::ratelimit::class_of;
-use crate::primitives::{channels, identity, notify, Fail};
+use crate::primitives::{channels, identity, media, notify, Fail};
 use crate::state::AppState;
 
 /// Handles one parsed frame, returns the ack. Never panics, never closes —
@@ -266,6 +266,17 @@ async fn run(
             Ok(None)
         }
 
+        Cmd::MediaRequestUpload { kind, bytes, mime } => {
+            let ticket = media::request_upload(state, who, kind, bytes, &mime).await?;
+            Ok(Some(
+                serde_json::to_value(ticket).map_err(anyhow::Error::from)?,
+            ))
+        }
+        Cmd::MediaCommit { media_id } => {
+            media::commit(state, who, media_id).await?;
+            Ok(None)
+        }
+
         Cmd::NotifySeen { ids } => {
             notify::seen(&state.pg, who, &ids).await?;
             Ok(None)
@@ -302,6 +313,8 @@ fn wire_name(cmd: &Cmd) -> &'static str {
         Cmd::ChannelsUnpin { .. } => "channels.unpin",
         Cmd::ChannelsMemberAdd { .. } => "channels.member_add",
         Cmd::ChannelsMemberRemove { .. } => "channels.member_remove",
+        Cmd::MediaRequestUpload { .. } => "media.request_upload",
+        Cmd::MediaCommit { .. } => "media.commit",
         Cmd::NotifySeen { .. } => "notify.seen",
         Cmd::NotifyClear => "notify.clear",
     }
