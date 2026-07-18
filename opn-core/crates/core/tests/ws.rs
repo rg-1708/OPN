@@ -166,8 +166,15 @@ async fn sub_authz(admin: PgPool) {
         "other notify: {ack}"
     );
 
+    // Sprint 3: ch: subs route through channels::authorize_sub — a non-member
+    // (an unknown channel is RLS-hidden, so indistinguishable) gets forbidden,
+    // no existence leak. (Sprint 2 returned the placeholder not_found.)
     let ack = c.cmd(sub(format!("ch:{}", new_id()))).await;
-    assert_eq!(ack["err"]["code"], json!("not_found"), "unowned ch: {ack}");
+    assert_eq!(
+        ack["err"]["code"],
+        json!("forbidden"),
+        "non-member ch: {ack}"
+    );
 
     let ack = c.cmd(sub("garbage".into())).await;
     assert_eq!(ack["err"]["code"], json!("invalid"), "bad topic: {ack}");

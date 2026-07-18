@@ -14,4 +14,7 @@ pub use cmd::{Cmd, SettingsScope};
 pub use envelope::{ClientFrame, ServerMsg};
 pub use error::{ErrBody, ErrCode};
 pub use evt::{Evt, EvtClass};
-pub use types::{AppAccountInfo, CharacterInfo, DeviceInfo, MePayload, SessionMintResponse};
+pub use types::{
+    AppAccountInfo, ChannelSummary, CharacterInfo, DeviceInfo, InboxItem, MePayload, MessageBody,
+    MessagePreview, NotifyClass, SessionMintResponse,
+};

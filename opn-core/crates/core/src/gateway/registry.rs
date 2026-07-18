@@ -280,6 +280,26 @@ impl SessionRegistry {
             .get(&(world, character))
             .is_some_and(|c| *c > 0)
     }
+
+    /// Device ids of a character's live sessions, for `notify::route` to push
+    /// `notify:<device>` events at (§10.8). Deduped across a character's
+    /// multiple device sessions.
+    // ponytail: O(live sessions) scan. The send path never reaches here (it
+    // only routes to *offline* members, which short-circuit to the inbox), and
+    // Sprint 3 has no online-notify caller but the direct route test. Add a
+    // (world,character)→sessions index if notify-to-online becomes hot (Sprint
+    // 6 rings online callees).
+    pub fn online_notify_targets(&self, world: Uuid, character: Uuid) -> SmallVec<[Uuid; 4]> {
+        let mut out: SmallVec<[Uuid; 4]> = SmallVec::new();
+        for h in self.sessions.iter() {
+            let id = &h.identity;
+            if id.world_id == world && id.character_id == character && !out.contains(&id.device_id)
+            {
+                out.push(id.device_id);
+            }
+        }
+        out
+    }
 }
 
 fn serialize_push(topic: &str, evt: &Evt) -> Arc<str> {

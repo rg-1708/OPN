@@ -426,6 +426,15 @@ does its job end to end.
 **Depends on**: Sprint 2. Notify comes first inside the sprint (channels
 routes through it).
 
+> **Amendment (2026-07-18, build):** item 2's "all five tables" shrank to
+> three — `channels`, `channel_members`, `messages` (partitioned). `reactions`
+> and `channel_pins` moved to Sprint 4 with their handlers. Rationale: the
+> "do it now" argument is retrofit-is-a-rewrite, which applies only to
+> `messages` *partitioning*; the two unpartitioned tables have no retrofit cost
+> and no Sprint 3 consumer or test, so front-loading them is pure YAGNI (the
+> "scope may shrink by moving items later" allowance). See reflections
+> 2026-07-18 (Sprint 3), decision 5.
+
 ### Work items
 
 1. **Notify** (§10.8, CDR-1):

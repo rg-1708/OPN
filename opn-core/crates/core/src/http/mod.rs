@@ -8,6 +8,8 @@ use metrics_exporter_prometheus::PrometheusHandle;
 
 use crate::state::AppState;
 
+pub mod auth;
+pub mod notify;
 pub mod tenant;
 
 pub fn app_router(state: AppState) -> Router {
@@ -15,6 +17,7 @@ pub fn app_router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/ws", get(crate::gateway::ws::ws_handler))
         .route("/v1/tenants/self/sessions", post(tenant::mint_session))
+        .route("/v1/notify/inbox", get(notify::inbox))
         .with_state(state)
 }
 

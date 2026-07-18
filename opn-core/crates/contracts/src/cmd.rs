@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use uuid::Uuid;
 
+use crate::types::MessageBody;
+
 /// Every client→server command. Serde does the routing, `match` does the
 /// dispatch, the compiler does the exhaustiveness (OPN-CORE.md §7).
 ///
@@ -50,6 +52,43 @@ pub enum Cmd {
     IdentitySetSharePresence {
         on: bool,
     },
+
+    // ── channels (§10.2) ─────────────────────────────────────────────────
+    /// Persist + sequence + fan out a message (§8). `client_uuid` is the
+    /// caller-chosen idempotency key: a retry with the same one returns the
+    /// original ack and fans out nothing.
+    #[serde(rename = "channels.send")]
+    ChannelsSend {
+        channel_id: Uuid,
+        client_uuid: Uuid,
+        body: MessageBody,
+    },
+    /// Found-or-create the pair thread to a phone number (§10.2). Resolves the
+    /// number through the directory seam; a blocked/unknown number is
+    /// `not_found` either way (privacy, §10.7).
+    #[serde(rename = "channels.open_direct")]
+    ChannelsOpenDirect {
+        number: String,
+    },
+    /// Create a group: creator + explicit member list (≤ 32), kind=group.
+    #[serde(rename = "channels.create")]
+    ChannelsCreate {
+        #[ts(type = "string | null")]
+        name: Option<String>,
+        members: Vec<Uuid>,
+    },
+    /// Snapshot of the caller's memberships (channel + own watermarks +
+    /// last-message preview).
+    #[serde(rename = "channels.list")]
+    ChannelsList,
+
+    // ── notify (§10.8) ───────────────────────────────────────────────────
+    #[serde(rename = "notify.seen")]
+    NotifySeen {
+        ids: Vec<Uuid>,
+    },
+    #[serde(rename = "notify.clear")]
+    NotifyClear,
 }
 
 /// Which settings document an `identity.*_settings` command targets.

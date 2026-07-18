@@ -6,6 +6,167 @@ to OPN-CORE.md as CDRs — this file records *how the build actually went*.
 
 ---
 
+## 2026-07-18 (later again) — Sprint 3 (Notify + channels hot path): built, all exit criteria pass
+
+The product's spine. A message is now persisted, sequenced, acked, fanned out
+live, and inboxed offline — end to end.
+
+### What exists now
+
+- **Migrations `0004_notify.sql` + `0005_channels.sql`.**
+  - `inbox` (RLS) — durable landing for notifications whose recipient had no
+    live session.
+  - `channels`, `channel_members`, and `messages` — the latter
+    `PARTITION BY RANGE (created_at)` from migration one, current + next month
+    created at apply time. Ordered-pair unique (`pair_a`, `pair_b`) for
+    open_direct. All three carry the 0001 RLS convention (NULLIF form).
+  - `ensure_message_partition(timestamptz)` — a `SECURITY DEFINER` function
+    (owned by the migrate role) so the janitor, running as `opn_app`, can
+    create partitions it otherwise lacks DDL rights for.
+  - **`reactions` and `channel_pins` deferred to Sprint 4** (see decisions).
+- **`primitives/notify.rs`** — `route` (online → push `notify.event` on each
+  `notify:<device>`; offline → one `inbox` row; muted → class downgraded to
+  `silent`), `seen`, `clear`, `inbox_list`. The one routing choke point every
+  other primitive will call.
+- **`primitives/channels/`** — `store.rs` (SQL) + `mod.rs` (validation +
+  fan-out): the send hot path (§8), `open_direct` (found-or-create pair),
+  `create` (groups, cap 32, cross-world member reject), `list` (lateral
+  last-message preview), `authorize_sub`. Body validation (8 KB cap,
+  at-least-one-field, gif host allowlist, media gate).
+- **`primitives/directory/mod.rs`** — the `resolve` seam (number → character)
+  in its final home; blocks join it in Sprint 5.
+- **Contracts** — 6 new `Cmd` (`channels.send/open_direct/create/list`,
+  `notify.seen/clear`), 2 new `Evt` (`channels.message`, `notify.event`, both
+  **Durable**), `MessageBody`/`ChannelSummary`/`MessagePreview`/`InboxItem`/
+  `NotifyClass`. Bindings regenerated (`export_ts` now lists the two response
+  payloads unreachable from the Cmd/Evt graph).
+- **HTTP** — `http/auth.rs` `JwtIdentity` extractor (reused by Sprint 4's
+  history/gallery/ledger reads) and `GET /v1/notify/inbox?limit`.
+- **Wiring** — dispatch arms, `class_of` (`send`→Msg, list/seen→Read, rest→
+  Social), `Cmd`/`Evt` coverage match-tests, `registry::online_notify_targets`,
+  janitor `message_partition` stopgap task.
+- **Tests** — 96 green across the workspace (+2 ignored benches). New: 6
+  channel invariants (`channels_seq.rs`), 8 channel protocol tests
+  (`channels.rs`), 7 notify tests (`notify.rs`), 5 body-validation unit tests.
+
+### Decisions closed during implementation
+
+1. **The idempotency check runs AFTER the channel row lock, not before the
+   insert** — the sprint's load-bearing correctness call. The roadmap's
+   "pre-check then insert; the unique index guards the same-partition race" is
+   *insufficient*: the partitioned unique index must carry `created_at`
+   (partition key), and two concurrent identical `client_uuid` sends get
+   different `now()` timestamps → the unique never fires → duplicate rows with
+   different seqs. Fix: `UPDATE channels … RETURNING` (row lock) first, then the
+   `(channel_id, client_uuid)` pre-check under that lock, and **roll back the
+   seq bump on a dedup hit** so no gap forms. The channel lock serializes all
+   sends per channel, so the loser sees the winner's committed row. This is the
+   same class of subtlety as Sprint 0's NULLIF and Sprint 1's SAVEPOINT.
+   Covered by `concurrent_identical_client_uuid` and `cross_partition_idempotency`.
+2. **Partition creation is a `SECURITY DEFINER` function**, because `opn_app`
+   (NOSUPERUSER, no DDL) cannot `CREATE TABLE`. `search_path = public, pg_temp`
+   — `pg_temp` **last** (PG16 hardening: a temp-schema object could otherwise
+   shadow an unqualified name and run with owner rights), `public` first so the
+   new partition lands there. My first attempt (`pg_catalog` first) made
+   `CREATE TABLE` target the catalog → `permission denied`; the live DB caught
+   it in one run (again: desk-check misses, real Postgres catches).
+3. **`notify.event` is Durable backpressure class.** A silently dropped
+   ring/alert is exactly the degradation ADR-1 forbids; a consumer too slow for
+   its own notifications is closed and re-syncs the durable truth on reconnect
+   (channel watermarks, inbox, later `/calls/active`). Mirrors
+   `channels.message`.
+4. **Fan-out is split by cost.** Live `ch:` publish (local registry, one
+   serialize) runs inline; the offline-member inbox writes (potentially many)
+   are `tokio::spawn`ed post-ack — §8's fire-and-forget. Keeps `channels.send`
+   fast (p99 1.8 ms) regardless of member count. A crash before the spawn
+   completes loses only the badge; the message row is durable and reaches the
+   member via resume (Sprint 4).
+5. **`reactions` + `channel_pins` tables deferred to Sprint 4.** The roadmap
+   front-loads "all five tables" on the retrofit-is-a-rewrite argument — but
+   that applies only to `messages` *partitioning*. reactions/pins are
+   unpartitioned, have no Sprint 3 consumer and no Sprint 3 tests, so creating
+   them now is pure YAGNI. They land with their handlers next sprint (the
+   roadmap's own "shrink by moving items later" allowance).
+6. **Media attachment check gated OFF** (`media_ids` non-empty → `forbidden`):
+   the `media` table does not exist until Sprint 5, so no id can be valid, and
+   you cannot query a table that isn't there. Sprint 5 item 6 un-gates this into
+   the real owned+live count check.
+7. **`gif_url` allowlist is a hardcoded const**, exact-host + https-only (a tiny
+   hand-parser, no `url` dep in core). Config only when a deployment needs
+   custom providers.
+8. **The end-to-end demo is the `send_delivers_to_subscriber` integration
+   test** (two real WS clients over a live socket) — it *is* "in-repo, used in
+   every future sanity check" and runs in CI, unlike a websocat script that
+   needs a seeded key and a running stack.
+9. **online members are not badged by send** — channels routes `notify::route`
+   only to *offline* members (roadmap §8 wording); online members rely on their
+   `ch:` subscription. `route`'s online-push branch exists for Sprint 6 (calls
+   ring an online callee who has no standing sub). The review flagged this as
+   worth confirming; it is deliberate. If product wants online badging, have
+   send call `route` for online non-senders too and let `route` decide.
+10. `open_direct` kind = `'dm'`; self-DM → `invalid`; unknown/blocked number →
+    `not_found` (privacy: block indistinguishable from no-such-number, Sprint 5).
+11. inbox HTTP is `?limit` only; the shared cursor util (Sprint 4 item 1)
+    retrofits it — the roadmap's tracked TODO, closed there.
+
+### Exit criteria status
+
+| Criterion | Status |
+|---|---|
+| End-to-end demo script in-repo (two clients, one sends, other renders) | **PASS** — `channels::send_delivers_to_subscriber`: A opens the pair, B subs `ch:`, A sends, B receives `channels.message` seq 1. Real socket, in CI. |
+| Concurrent-seq test green 100 consecutive runs | **PASS** — `concurrent_senders_gapless` (16 tasks × 50 → gapless dup-free 1..=800) run 100×: **0 failures**. |
+| p99 `channels.send` < 5 ms at 30 msg/s (record it) | **PASS** — store-path p99 = **1.8 ms** (p50 1.4, max 9.3), unloaded floor over 2000 sends (`send_latency_p99`, `#[ignore]`). Paced/loaded version is Sprint 4's loadgen. |
+| All `channels.*` / `notify.*` in the coverage match-test | **PASS** — `tests/coverage.rs` extended; both new `Evt` too. |
+| RLS on all new tables, cross-world proof | **PASS** — `cross_world_channel_isolated`, `inbox_rls_isolated`; every domain query through `world_tx`. |
+
+Clippy `-D warnings` clean, fmt clean, full suite green against the live stack.
+CI-on-a-remote still open (no push this session).
+
+### Reflection
+
+- **The subagent recipe scaled again, now with a review leg.** Main thread kept
+  the coupled/subtle core (both migrations, the send hot path, all contracts +
+  wiring, the seq invariants); two opus agents wrote the two independent test
+  suites (notify, channels breadth) against the compiling code; a third did a
+  read-only adversarial review. Zero merge conflicts — disjoint file ownership
+  (agents own exactly one `tests/*.rs` each; nobody touches `common/`). Writing
+  the production code main-thread and delegating the *test* suites (rather than
+  the reverse) fit this sprint's tight coupling better and gave the tests a
+  mild independence check for free.
+- **The independence paid off twice.** Agent B (channels tests) caught a real
+  regression I introduced — the Sprint-2 `ws::sub_authz` still asserted the
+  placeholder `not_found` for `ch:` subs, now correctly `forbidden`. The review
+  agent found one real MEDIUM (the `pg_temp` search_path hole) — defense-in-
+  depth in exactly the hardening I'd attempted.
+- **The send hot path passed all 6 invariants on the first run.** The post-lock
+  idempotency design (decision 1) was right the first time; the value was in
+  reasoning it through *before* coding, not in iterating. Worth repeating: the
+  subtle concurrency piece is where main-thread attention earns its keep.
+- **Real-Postgres-catches-desk-checks, third sprint running.** My `pg_temp` fix
+  was itself subtly wrong (`pg_catalog` first → catalog became the CREATE
+  target); one test run surfaced it. The pattern is now a law of this codebase.
+- **Not committed** — Sprint 3 left in the tree (Sprints 0–2 are committed;
+  `feat: implemented sprint 1 and 2`). Committing + first push (which arms CI +
+  the contracts drift gate, still open from Sprint 0) remains the operator's
+  call.
+
+### Next session
+
+1. Consider committing Sprint 3 (and the first push — it burns down Sprint 0's
+   last CI/drift-gate criterion).
+2. Sprint 4 — channels complete + pagination + loadgen v0: the shared cursor
+   util (`infra/cursor.rs`) and retrofit the inbox `?limit` read onto it
+   (closes the Sprint 3 TODO); **`reactions` + `channel_pins` tables land here**
+   with their handlers; receipts (watermark), typing (ephemeral), members,
+   `channels.member`; **resume replay** (the `ch:` `last_seq` is accepted-and-
+   ignored today — wire the >seq replay before the sub ack, overflow event at
+   500); history HTTP (`JwtIdentity` extractor is ready); and `opn-loadgen` v0
+   + the nightly perf smoke. Remember: online-member badging (decision 9) and
+   the Bearer-scheme case-sensitivity (a codebase-wide minor, shared with
+   `TenantAuth`) are open if they matter.
+
+---
+
 ## 2026-07-18 (later still) — Sprint 2 (WS gateway): built, all exit criteria pass
 
 ### What exists now

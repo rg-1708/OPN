@@ -15,7 +15,7 @@ use super::registry::ConnHandle;
 use super::topic::TopicKind;
 use crate::infra::auth::mint_jwt;
 use crate::infra::ratelimit::class_of;
-use crate::primitives::{identity, Fail};
+use crate::primitives::{channels, identity, notify, Fail};
 use crate::state::AppState;
 
 /// Handles one parsed frame, returns the ack. Never panics, never closes —
@@ -142,10 +142,15 @@ async fn run(
                     state.registry.push_to(handle, &topic, &snap);
                     Ok(None)
                 }
-                // Owning primitives land in Sprints 3/6/8.
-                TopicKind::Ch(_) | TopicKind::Call(_) | TopicKind::Feed(_) => {
-                    Err(Fail::Code(ErrCode::NotFound))
+                TopicKind::Ch(channel_id) => {
+                    // Membership authz (§4.4); resume replay lands Sprint 4
+                    // (last_seq accepted-and-ignored above).
+                    channels::authorize_sub(state, who, channel_id).await?;
+                    state.registry.subscribe(&topic, handle);
+                    Ok(None)
                 }
+                // Owning primitives land in Sprints 6/8.
+                TopicKind::Call(_) | TopicKind::Feed(_) => Err(Fail::Code(ErrCode::NotFound)),
             }
         }
 
@@ -176,6 +181,35 @@ async fn run(
             handle.share_presence.store(on, Ordering::Relaxed);
             Ok(None)
         }
+
+        Cmd::ChannelsSend {
+            channel_id,
+            client_uuid,
+            body,
+        } => Ok(Some(
+            channels::send(state, who, channel_id, client_uuid, &body).await?,
+        )),
+        Cmd::ChannelsOpenDirect { number } => {
+            Ok(Some(channels::open_direct(state, who, &number).await?))
+        }
+        Cmd::ChannelsCreate { name, members } => {
+            Ok(Some(channels::create(state, who, name, members).await?))
+        }
+        Cmd::ChannelsList => {
+            let list = channels::list(state, who).await?;
+            Ok(Some(
+                serde_json::to_value(list).map_err(anyhow::Error::from)?,
+            ))
+        }
+
+        Cmd::NotifySeen { ids } => {
+            notify::seen(&state.pg, who, &ids).await?;
+            Ok(None)
+        }
+        Cmd::NotifyClear => {
+            notify::clear(&state.pg, who).await?;
+            Ok(None)
+        }
     }
 }
 
@@ -191,5 +225,11 @@ fn wire_name(cmd: &Cmd) -> &'static str {
         Cmd::IdentityGetSettings { .. } => "identity.get_settings",
         Cmd::IdentitySetSettings { .. } => "identity.set_settings",
         Cmd::IdentitySetSharePresence { .. } => "identity.set_share_presence",
+        Cmd::ChannelsSend { .. } => "channels.send",
+        Cmd::ChannelsOpenDirect { .. } => "channels.open_direct",
+        Cmd::ChannelsCreate { .. } => "channels.create",
+        Cmd::ChannelsList => "channels.list",
+        Cmd::NotifySeen { .. } => "notify.seen",
+        Cmd::NotifyClear => "notify.clear",
     }
 }

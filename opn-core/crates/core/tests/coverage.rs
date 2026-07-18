@@ -21,6 +21,14 @@ fn every_cmd_names_its_covering_test() {
             Cmd::IdentityGetSettings { .. } => "identity::settings_roundtrip",
             Cmd::IdentitySetSettings { .. } => "identity::settings_roundtrip",
             Cmd::IdentitySetSharePresence { .. } => "ws::share_presence_off_null_snapshot",
+            Cmd::ChannelsSend { .. } => {
+                "channels_seq::concurrent_senders_gapless, channels::send_delivers_to_subscriber"
+            }
+            Cmd::ChannelsOpenDirect { .. } => "channels::open_direct_found_or_create",
+            Cmd::ChannelsCreate { .. } => "channels::create_group_and_list",
+            Cmd::ChannelsList => "channels::create_group_and_list",
+            Cmd::NotifySeen { .. } => "notify::seen_marks_rows",
+            Cmd::NotifyClear => "notify::clear_empties_inbox",
         }
     }
     let _ = covering_test;
@@ -31,6 +39,8 @@ fn every_evt_names_its_covering_test() {
     fn covering_test(evt: &Evt) -> &'static str {
         match evt {
             Evt::PresenceState { .. } => "ws::presence_snapshot_and_transitions",
+            Evt::ChannelsMessage { .. } => "channels::send_delivers_to_subscriber",
+            Evt::NotifyEvent { .. } => "notify::route_pushes_to_online_recipient",
         }
     }
     let _ = covering_test;

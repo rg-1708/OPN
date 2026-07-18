@@ -46,10 +46,17 @@ pub fn class_of(cmd: &contracts::Cmd) -> Class {
         | Cmd::Unsub { .. }
         | Cmd::AuthRefresh
         | Cmd::IdentityMe
-        | Cmd::IdentityGetSettings { .. } => Class::Read,
+        | Cmd::IdentityGetSettings { .. }
+        | Cmd::ChannelsList
+        | Cmd::NotifySeen { .. } => Class::Read,
         Cmd::IdentityAppLogin { .. }
         | Cmd::IdentitySetSettings { .. }
-        | Cmd::IdentitySetSharePresence { .. } => Class::Social,
+        | Cmd::IdentitySetSharePresence { .. }
+        | Cmd::ChannelsOpenDirect { .. }
+        | Cmd::ChannelsCreate { .. }
+        | Cmd::NotifyClear => Class::Social,
+        // The hot path — its own class with a message-rate budget (§12).
+        Cmd::ChannelsSend { .. } => Class::Msg,
     }
 }
 

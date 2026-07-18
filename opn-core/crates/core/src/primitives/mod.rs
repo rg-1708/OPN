@@ -4,7 +4,10 @@
 
 use contracts::ErrCode;
 
+pub mod channels;
+pub mod directory;
 pub mod identity;
+pub mod notify;
 
 /// Handler failure: a deliberate protocol error (acked with its code) or an
 /// internal error (logged, acked `internal` with no detail — §7).

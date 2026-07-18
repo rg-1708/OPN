@@ -69,6 +69,23 @@ pub async fn mint_token(
     (token, minted.identity)
 }
 
+/// Like [`mint_token`] but returns the full mint result — open_direct and
+/// directory tests need the character's assigned phone number, which
+/// `Minted.character.number` carries.
+pub async fn mint_full(
+    app: &PgPool,
+    tenant: Uuid,
+    world: Uuid,
+    framework_ref: &str,
+) -> (String, opn_core::primitives::identity::Minted) {
+    let minted =
+        opn_core::primitives::identity::mint_session(app, tenant, world, framework_ref, None, 600)
+            .await
+            .expect("mint_session");
+    let token = opn_core::infra::auth::mint_jwt("test", &minted.identity).expect("mint_jwt");
+    (token, minted)
+}
+
 /// `{"id":id,"cmd":"auth","payload":{"token":token}}` — the mandatory first
 /// frame. JWTs and the test garbage tokens are all JSON-safe (no quotes).
 pub fn auth_frame(id: u64, token: &str) -> String {

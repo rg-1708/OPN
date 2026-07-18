@@ -26,6 +26,7 @@ pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
             tick.tick().await;
             run_task("expired_sessions", expired_sessions(&state.pg)).await;
             run_task("retired_numbers_sweep", retired_numbers_sweep(&state.pg)).await;
+            run_task("message_partition", ensure_next_partition(&state.pg)).await;
             // In-process, no DB: buckets idle > 10 min go away (§12).
             run_task("ratelimit_sweep", async { Ok(state.limits.sweep_idle()) }).await;
         }
@@ -89,4 +90,18 @@ pub async fn retired_numbers_sweep(pool: &PgPool) -> Result<u64> {
         "DELETE FROM retired_numbers WHERE freed_at < now() - interval '30 days'",
     )
     .await
+}
+
+/// Stopgap `messages` partition maintenance (roadmap Sprint 3 item 2): create
+/// next month's partition ahead of time so month-boundary writes never hit a
+/// missing partition. NOT world-scoped — partitions are global — so no worlds
+/// loop. The DDL runs via a SECURITY DEFINER function (opn_app cannot CREATE
+/// TABLE; the function owner can); `IF NOT EXISTS` makes it idempotent and
+/// safe to run every tick. Sprint 11 replaces this caller with pg_cron and
+/// deletes the task (§9).
+pub async fn ensure_next_partition(pool: &PgPool) -> Result<u64> {
+    sqlx::query("SELECT ensure_message_partition(now() + interval '1 month')")
+        .execute(pool)
+        .await?;
+    Ok(0)
 }
