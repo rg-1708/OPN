@@ -74,6 +74,14 @@ and stopped here. No roadmap amendment (items 6/7 stay in Sprint 6).
    nothing pushes a *cancellation* to a callee who hasn't yet subscribed to
    `call:<id>` — a stale-accept just gets `Conflict`. Inherent to the "dialer
    needs no standing sub" design (§10.4).
+6. **Signal authz is stricter than the roadmap's wording** *(logged post-audit)*:
+   item 3 says sender and `to` must be "non-declined participants"; the code
+   requires `state IN ('ringing','joined')`, which also excludes `left`. A
+   participant who hung up signaling into a call they exited is nonsense, so
+   stricter is right — but it is a deviation, so it's on the record. Also
+   unlogged until this audit: the ring payload carries `caller_number` + `video`
+   beyond the roadmap's "carrying `call_id`" (caller-ID the callee needs;
+   blocked pairs never reach `start`, so no leak).
 
 ### The keeper this session (the point of rule 4): a HIGH bug caught by **triple convergence**
 
@@ -143,7 +151,8 @@ seqless snapshots.
   decline's end-rule, signal authz + 16 KB cap + ended→conflict, FSM conflict
   paths, participant-only sub, the janitor reap (+ the un-ignored crash regression),
   cross-world RLS, and a concurrent-hangup deadlock canary. Plus 6 `fsm.rs` units
-  and 3 golden wire tests.
+  (incl. the exhaustive 36-cell table test, added post-audit) and 3 golden wire
+  tests.
 - Both adversarial reviewers confirmed FSM faithfulness (cell-by-cell), SQL bind
   correctness, deadlock-free lock ordering, RLS/migration correctness, and wiring
   completeness — beyond the one HIGH + one MED they found.
@@ -153,7 +162,7 @@ seqless snapshots.
 | Criterion | Status |
 |---|---|
 | Scripted two-client + fake-link demo (call connects, link `set_targets`, hangup clears) | **PARTIAL** — the two-client call lifecycle is `full_lifecycle_start_accept_signal_hangup` (real sockets); the fake-**link** half is part B. |
-| FSM is a pure function with 100 % transition-table coverage | **PASS (part A scope)** — pure `apply`, unit tests over the table + terminal absorption; the exhaustive generated proptest is Sprint 9. |
+| FSM is a pure function with 100 % transition-table coverage | **PASS** — pure `apply` + `transition_table_exhaustive`: all 36 session×actor×action cells asserted against a *literal* legal-set table (not a predicate — that would mirror the implementation and prove nothing). Post-audit close: the first write-up claimed this on ~23 cells; the audit downgraded it and the exhaustive test closed it properly. Sprint 9's proptest is on top, not instead. |
 | All `calls.*` in coverage test; `/link` + re-sync in route test | **PARTIAL** — all 5 `calls.*` + both events in the coverage match-test; `/link` is part B (adds no HTTP route in A). |
 
 ### Reflection

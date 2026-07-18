@@ -157,4 +157,51 @@ mod tests {
             }
         }
     }
+
+    /// Exhaustive legality over every (session × actor × action) cell — the
+    /// Sprint 6 exit criterion. Legality depends only on this triple (`others`
+    /// affects the *resulting* session state, covered by the targeted tests
+    /// above), so 36 cells settle the whole table. The legal set is a literal
+    /// list, NOT a predicate — a predicate would just mirror the
+    /// implementation and prove nothing.
+    #[test]
+    fn transition_table_exhaustive() {
+        use Action::*;
+        // (session, actor, action, actor's resulting state)
+        const LEGAL: &[(S, P, Action, P)] = &[
+            (S::Ringing, P::Ringing, Accept, P::Joined),
+            (S::Active, P::Ringing, Accept, P::Joined),
+            (S::Ringing, P::Ringing, Decline, P::Declined),
+            (S::Active, P::Ringing, Decline, P::Declined),
+            (S::Ringing, P::Joined, Hangup, P::Left),
+            (S::Active, P::Joined, Hangup, P::Left),
+        ];
+        for session in [S::Ringing, S::Active, S::Ended] {
+            for actor in [P::Ringing, P::Joined, P::Declined, P::Left] {
+                for action in [Accept, Decline, Hangup] {
+                    let legal = LEGAL
+                        .iter()
+                        .find(|(s, a, ac, _)| *s == session && *a == actor && *ac == action);
+                    // `others` context is irrelevant to legality; use one with
+                    // an active party so a legal cell never ends the session.
+                    let got = apply(session, actor, &[P::Joined], action);
+                    match legal {
+                        Some((_, _, _, want)) => {
+                            let t = got.unwrap_or_else(|()| {
+                                panic!("{session:?}+{actor:?}+{action:?} must be legal")
+                            });
+                            assert_eq!(
+                                t.participant, *want,
+                                "{session:?}+{actor:?}+{action:?} wrong actor state"
+                            );
+                        }
+                        None => assert!(
+                            got.is_err(),
+                            "{session:?}+{actor:?}+{action:?} must be illegal"
+                        ),
+                    }
+                }
+            }
+        }
+    }
 }

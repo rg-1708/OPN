@@ -765,9 +765,19 @@ Sprint 3).
      state (CDR-6).
 4. **Events**: `calls.state` = full snapshot every change (small; kills
    delta desync). Ring delivery via notify (already above).
-5. **Janitor**: sessions `state != ended` with zero `joined` participants
-   and `created_at < now() - 60 s` → force-end + link `clear` (no zombie
+5. **Janitor**: sessions still `ringing` (never accepted) and
+   `created_at < now() - 60 s` → force-end + link `clear` (no zombie
    rings, §10.4).
+
+   > **Amendment (2026-07-18, build):** the original predicate here — "zero
+   > `joined` participants" — is unimplementable: item 3's `calls.start`
+   > joins the caller immediately and a crashed caller's WS disconnect never
+   > transitions that row, so every real ring keeps a joined participant and
+   > the reap would skip exactly the zombie it exists for (unanswered ring
+   > lingers forever, busy-check pins both parties). A ring only leaves
+   > `ringing` via accept, so `state = 'ringing' AND age > 60 s` reaps
+   > precisely the un-accepted rings and never an `active` call. OPN-CORE.md
+   > §10.4 amended the same day. See reflections 2026-07-18 (Sprint 6).
 6. **Tenant link** (§5):
    - `GET /link` WS upgrade authed by API key header (reuse `TenantAuth`).
      One connection per tenant, last-writer-wins (same takeover mechanism
