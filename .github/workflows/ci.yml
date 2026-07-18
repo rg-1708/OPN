@@ -49,8 +49,10 @@ jobs:
         with:
           workspaces: opn-core
       # Named services: the one-shot createbucket container exits by design,
-      # which would fail `up --wait`. MinIO joins when media tests land.
-      - run: docker compose -f docker-compose.dev.yml up -d --wait postgres redis
+      # which would fail `up --wait` — so it runs as a separate step via
+      # `run --rm` (propagates its exit code, no --wait involvement).
+      - run: docker compose -f docker-compose.dev.yml up -d --wait postgres redis minio
+      - run: docker compose -f docker-compose.dev.yml run --rm createbucket
       - run: cargo test --workspace
 
   contracts-drift:

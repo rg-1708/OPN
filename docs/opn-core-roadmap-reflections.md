@@ -156,6 +156,14 @@ found two coverage conventions that had silently lapsed; both closed now:
    resolve). The doc now says "do not fix this by gating `channels.send`" so
    nobody helpfully breaks it later.
 
+4. **CI got MinIO** — first `cargo test --workspace` run on CI failed the three
+   live-MinIO media tests with `ConnectionRefused :9000`: the workflow only
+   started `postgres redis`, and its own comment ("MinIO joins when media tests
+   land") was the forgotten follow-up from part A. Fixed: `up -d --wait` now
+   includes `minio`, and the one-shot `createbucket` runs as a separate
+   `run --rm` step (it exits by design, so it can't ride `--wait`; `mc mb -p`
+   makes it idempotent — verified locally, exit 0 on an existing bucket).
+
 Lesson: conventions enforced by discipline (per-sprint canary, per-command
 golden) drift exactly the way the roadmap's compiler-enforced ones don't —
 both lapses started the first sprint after their pattern was established and
