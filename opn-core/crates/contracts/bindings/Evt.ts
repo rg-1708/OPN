@@ -7,4 +7,8 @@
  * exists from day one so the contracts drift gate and the coverage
  * match-test exist from day one.
  */
-export type Evt = never;
+export type Evt = { "evt": "presence.state", "payload": { character_id: string, online: boolean | null, 
+/**
+ * RFC 3339; present only in `online: false` transitions.
+ */
+last_seen_at: string | null, } };

@@ -10,5 +10,7 @@ fn main() {
     contracts::Cmd::export_all_to(dir).expect("export Cmd");
     contracts::Evt::export_all_to(dir).expect("export Evt");
     contracts::ErrCode::export_all_to(dir).expect("export ErrCode");
+    contracts::SessionMintResponse::export_all_to(dir).expect("export SessionMintResponse");
+    contracts::MePayload::export_all_to(dir).expect("export MePayload");
     println!("bindings written to {dir}");
 }

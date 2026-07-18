@@ -23,6 +23,16 @@ pub struct Config {
     pub session_ttl_secs: u64,
     /// >1 enables the Redis pub/sub fan-out path.
     pub replicas: u32,
+    /// Per-connection send-queue depth (§4.3). Prod default 256; tests set it
+    /// tiny to exercise backpressure without generating thousands of events.
+    pub sendq_capacity: usize,
+    /// Pre-auth connection caps (§4.1): sockets that have not yet sent a
+    /// valid `auth` frame.
+    pub preauth_global_max: u32,
+    pub preauth_per_ip_max: u8,
+    /// WS ping interval; close after 2 missed pongs (§4.1). Configurable so
+    /// the missed-pong test does not take a minute.
+    pub heartbeat_secs: u64,
 }
 
 fn req(name: &str) -> Result<String> {
@@ -35,6 +45,17 @@ where
 {
     raw.parse()
         .with_context(|| format!("invalid value for env var {name}"))
+}
+
+/// Optional var with a documented default.
+fn opt<T: std::str::FromStr>(name: &str, default: T) -> Result<T>
+where
+    T::Err: std::error::Error + Send + Sync + 'static,
+{
+    match std::env::var(name) {
+        Ok(v) => parse(name, v),
+        Err(_) => Ok(default),
+    }
 }
 
 impl Config {
@@ -58,6 +79,10 @@ impl Config {
                 Ok(v) => parse("OPN_REPLICAS", v)?,
                 Err(_) => 1,
             },
+            sendq_capacity: opt("OPN_SENDQ_CAPACITY", 256)?,
+            preauth_global_max: opt("OPN_PREAUTH_GLOBAL_MAX", 1000)?,
+            preauth_per_ip_max: opt("OPN_PREAUTH_PER_IP_MAX", 5)?,
+            heartbeat_secs: opt("OPN_HEARTBEAT_SECS", 30)?,
         })
     }
 }

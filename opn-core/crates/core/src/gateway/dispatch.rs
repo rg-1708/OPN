@@ -1,0 +1,195 @@
+//! Sequential per-connection dispatch (§7, CDR-5): parse → rate limit →
+//! match → handler → ack. Handlers are plain async fns in `primitives`; this
+//! module owns the wire ack, the span, and the metrics.
+
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::Instant;
+
+use contracts::{Cmd, ErrBody, ErrCode, ServerMsg};
+use metrics::{counter, histogram};
+use serde_json::json;
+use tracing::Instrument;
+
+use super::registry::ConnHandle;
+use super::topic::TopicKind;
+use crate::infra::auth::mint_jwt;
+use crate::infra::ratelimit::class_of;
+use crate::primitives::{identity, Fail};
+use crate::state::AppState;
+
+/// Handles one parsed frame, returns the ack. Never panics, never closes —
+/// protocol errors become acks (§7); closing is the lifecycle's job.
+pub async fn dispatch(state: &AppState, handle: &Arc<ConnHandle>, id: u64, cmd: Cmd) -> ServerMsg {
+    let cmd_name = wire_name(&cmd);
+    let who = &handle.identity;
+
+    if let Err(retry_after_ms) = state.limits.check(who.character_id, class_of(&cmd)) {
+        counter!("opn_commands_total", "cmd" => cmd_name, "outcome" => "rate_limited").increment(1);
+        return ServerMsg::Ack {
+            reply_to: id,
+            ok: false,
+            payload: Some(json!({ "retry_after_ms": retry_after_ms })),
+            err: Some(ErrBody {
+                code: ErrCode::RateLimited,
+                msg: "rate limited".into(),
+            }),
+        };
+    }
+
+    let span = tracing::info_span!(
+        "cmd",
+        cmd = cmd_name,
+        tenant = %who.tenant_id,
+        world = %who.world_id,
+        char = %who.character_id,
+    );
+    let start = Instant::now();
+    let result = run(state, handle, cmd).instrument(span).await;
+    histogram!("opn_command_seconds", "cmd" => cmd_name).record(start.elapsed().as_secs_f64());
+
+    match result {
+        Ok(payload) => {
+            counter!("opn_commands_total", "cmd" => cmd_name, "outcome" => "ok").increment(1);
+            ServerMsg::Ack {
+                reply_to: id,
+                ok: true,
+                payload,
+                err: None,
+            }
+        }
+        Err(Fail::Code(code)) => {
+            counter!("opn_commands_total", "cmd" => cmd_name, "outcome" => "err").increment(1);
+            ServerMsg::Ack {
+                reply_to: id,
+                ok: false,
+                payload: None,
+                err: Some(ErrBody {
+                    code,
+                    msg: String::new(),
+                }),
+            }
+        }
+        Err(Fail::Internal(e)) => {
+            // Detail stays in the log, never on the wire (§7).
+            tracing::error!(error = %e, cmd = cmd_name, "handler internal error");
+            counter!("opn_commands_total", "cmd" => cmd_name, "outcome" => "internal").increment(1);
+            ServerMsg::Ack {
+                reply_to: id,
+                ok: false,
+                payload: None,
+                err: Some(ErrBody {
+                    code: ErrCode::Internal,
+                    msg: String::new(),
+                }),
+            }
+        }
+    }
+}
+
+async fn run(
+    state: &AppState,
+    handle: &Arc<ConnHandle>,
+    cmd: Cmd,
+) -> Result<Option<serde_json::Value>, Fail> {
+    let who = &handle.identity;
+    match cmd {
+        // Already authenticated — one auth per connection (§4.1).
+        Cmd::Auth { .. } => Err(Fail::Code(ErrCode::Conflict)),
+
+        Cmd::AuthRefresh => {
+            // Re-check revocation and bump the session in one guarded UPDATE;
+            // zero rows = revoked/expired underneath us (§11).
+            let mut tx = crate::infra::db::world_tx(&state.pg, who.world_id).await?;
+            let bumped: Option<i32> = sqlx::query_scalar(
+                "UPDATE sessions SET expires_at = now() + make_interval(secs => $2) \
+                 WHERE id = $1 AND revoked_at IS NULL AND expires_at > now() RETURNING 1",
+            )
+            .bind(who.session_id)
+            .bind(state.cfg.session_ttl_secs as f64)
+            .fetch_optional(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            if bumped.is_none() {
+                return Err(Fail::Code(ErrCode::Unauthorized));
+            }
+            let token = mint_jwt(&state.cfg.jwt_secret, who).map_err(Fail::Internal)?;
+            Ok(Some(json!({ "token": token })))
+        }
+
+        Cmd::Sub { topic, last_seq } => {
+            let Some(kind) = TopicKind::parse(&topic) else {
+                return Err(Fail::Code(ErrCode::Invalid));
+            };
+            if last_seq.is_some() {
+                // Resume replay lands in Sprint 4; shape is stable now.
+                tracing::debug!(%topic, "sub last_seq accepted and ignored (sprint 4)");
+            }
+            match kind {
+                TopicKind::Notify(device) => {
+                    // Own device only (§4.4).
+                    if device != who.device_id {
+                        return Err(Fail::Code(ErrCode::Forbidden));
+                    }
+                    state.registry.subscribe(&topic, handle);
+                    Ok(None)
+                }
+                TopicKind::Presence(character) => {
+                    let snap = super::presence::snapshot(state, who.world_id, character).await?;
+                    state.registry.subscribe(&topic, handle);
+                    // Snapshot before the ack (§4.4): ack received ⇒
+                    // snapshot delivered.
+                    state.registry.push_to(handle, &topic, &snap);
+                    Ok(None)
+                }
+                // Owning primitives land in Sprints 3/6/8.
+                TopicKind::Ch(_) | TopicKind::Call(_) | TopicKind::Feed(_) => {
+                    Err(Fail::Code(ErrCode::NotFound))
+                }
+            }
+        }
+
+        Cmd::Unsub { topic } => {
+            state.registry.unsubscribe(&topic, handle);
+            Ok(None)
+        }
+
+        Cmd::IdentityMe => {
+            let me = identity::me(&state.pg, who).await?;
+            Ok(Some(serde_json::to_value(me).map_err(anyhow::Error::from)?))
+        }
+        Cmd::IdentityAppLogin { app_id, account_id } => {
+            identity::app_login(&state.pg, who, &app_id, account_id).await?;
+            Ok(None)
+        }
+        Cmd::IdentityGetSettings { scope } => {
+            let doc = identity::get_settings(&state.pg, who, scope).await?;
+            Ok(Some(doc))
+        }
+        Cmd::IdentitySetSettings { scope, patch } => {
+            identity::set_settings(&state.pg, who, scope, patch).await?;
+            Ok(None)
+        }
+        Cmd::IdentitySetSharePresence { on } => {
+            identity::set_share_presence(&state.pg, who, on).await?;
+            // Keep the emit-time cache on this connection in step (§4.2).
+            handle.share_presence.store(on, Ordering::Relaxed);
+            Ok(None)
+        }
+    }
+}
+
+/// Wire name for metrics/span labels — matches the serde tag.
+fn wire_name(cmd: &Cmd) -> &'static str {
+    match cmd {
+        Cmd::Auth { .. } => "auth",
+        Cmd::Sub { .. } => "sub",
+        Cmd::Unsub { .. } => "unsub",
+        Cmd::AuthRefresh => "auth.refresh",
+        Cmd::IdentityMe => "identity.me",
+        Cmd::IdentityAppLogin { .. } => "identity.app_login",
+        Cmd::IdentityGetSettings { .. } => "identity.get_settings",
+        Cmd::IdentitySetSettings { .. } => "identity.set_settings",
+        Cmd::IdentitySetSharePresence { .. } => "identity.set_share_presence",
+    }
+}

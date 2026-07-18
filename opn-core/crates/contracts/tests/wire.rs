@@ -2,8 +2,9 @@
 //! shapes are literal strings here, not re-derived. Compared as
 //! `serde_json::Value` so key order is irrelevant but content is exact.
 
-use contracts::{ClientFrame, Cmd, ErrBody, ErrCode, ServerMsg};
+use contracts::{cmd::SettingsScope, ClientFrame, Cmd, ErrBody, ErrCode, Evt, ServerMsg};
 use serde_json::{json, Value};
+use uuid::Uuid;
 
 fn roundtrip(frame: &ClientFrame, golden: &str) {
     let ser = serde_json::to_value(frame).expect("serialize");
@@ -14,6 +15,19 @@ fn roundtrip(frame: &ClientFrame, golden: &str) {
         serde_json::to_value(&back).expect("re-serialize"),
         want,
         "deserialize(golden) round-trip"
+    );
+}
+
+#[test]
+fn client_frame_auth() {
+    roundtrip(
+        &ClientFrame {
+            id: 0,
+            cmd: Cmd::Auth {
+                token: "jwt.goes.here".into(),
+            },
+        },
+        r#"{"id":0,"cmd":"auth","payload":{"token":"jwt.goes.here"}}"#,
     );
 }
 
@@ -65,7 +79,96 @@ fn client_frame_auth_refresh_unit_variant_has_no_payload() {
             id: 4,
             cmd: Cmd::AuthRefresh,
         },
-        r#"{"id":4,"cmd":"auth_refresh"}"#,
+        r#"{"id":4,"cmd":"auth.refresh"}"#,
+    );
+}
+
+#[test]
+fn client_frame_identity_me_unit_variant_has_no_payload() {
+    roundtrip(
+        &ClientFrame {
+            id: 5,
+            cmd: Cmd::IdentityMe,
+        },
+        r#"{"id":5,"cmd":"identity.me"}"#,
+    );
+}
+
+#[test]
+fn client_frame_identity_app_login() {
+    roundtrip(
+        &ClientFrame {
+            id: 6,
+            cmd: Cmd::IdentityAppLogin {
+                app_id: "chirp".into(),
+                account_id: Uuid::parse_str("0198c5b6-0000-7000-8000-000000000002")
+                    .expect("valid uuid"),
+            },
+        },
+        r#"{"id":6,"cmd":"identity.app_login","payload":{"app_id":"chirp","account_id":"0198c5b6-0000-7000-8000-000000000002"}}"#,
+    );
+}
+
+#[test]
+fn client_frame_identity_get_settings() {
+    roundtrip(
+        &ClientFrame {
+            id: 7,
+            cmd: Cmd::IdentityGetSettings {
+                scope: SettingsScope::Device,
+            },
+        },
+        r#"{"id":7,"cmd":"identity.get_settings","payload":{"scope":"device"}}"#,
+    );
+}
+
+#[test]
+fn client_frame_identity_set_settings() {
+    roundtrip(
+        &ClientFrame {
+            id: 8,
+            cmd: Cmd::IdentitySetSettings {
+                scope: SettingsScope::Character,
+                patch: json!({"theme": "dark", "volume": 3}),
+            },
+        },
+        r#"{"id":8,"cmd":"identity.set_settings","payload":{"scope":"character","patch":{"theme":"dark","volume":3}}}"#,
+    );
+}
+
+#[test]
+fn client_frame_identity_set_share_presence() {
+    roundtrip(
+        &ClientFrame {
+            id: 9,
+            cmd: Cmd::IdentitySetSharePresence { on: true },
+        },
+        r#"{"id":9,"cmd":"identity.set_share_presence","payload":{"on":true}}"#,
+    );
+}
+
+#[test]
+fn push_presence_state() {
+    let push = ServerMsg::Push {
+        topic: "presence:0198c5b6-0000-7000-8000-000000000003".into(),
+        evt: Evt::PresenceState {
+            character_id: Uuid::parse_str("0198c5b6-0000-7000-8000-000000000003")
+                .expect("valid uuid"),
+            online: Some(false),
+            last_seen_at: Some("2026-07-18T12:00:00Z".into()),
+        },
+    };
+    assert_eq!(
+        serde_json::to_value(&push).expect("serialize"),
+        json!({
+            "topic": "presence:0198c5b6-0000-7000-8000-000000000003",
+            "evt": "presence.state",
+            "payload": {
+                "character_id": "0198c5b6-0000-7000-8000-000000000003",
+                "online": false,
+                "last_seen_at": "2026-07-18T12:00:00Z"
+            }
+        })
     );
 }
 

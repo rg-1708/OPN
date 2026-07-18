@@ -2,15 +2,19 @@ use std::time::Duration;
 
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use metrics_exporter_prometheus::PrometheusHandle;
 
 use crate::state::AppState;
 
+pub mod tenant;
+
 pub fn app_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/ws", get(crate::gateway::ws::ws_handler))
+        .route("/v1/tenants/self/sessions", post(tenant::mint_session))
         .with_state(state)
 }
 

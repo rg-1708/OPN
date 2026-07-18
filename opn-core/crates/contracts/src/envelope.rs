@@ -40,11 +40,8 @@ pub enum ServerMsg {
     },
     Push {
         topic: String,
-        // ponytail: ts(skip) because ts-rs cannot flatten an *empty* enum;
-        // swap to #[ts(flatten)] when the first Evt variant lands (Sprint 2).
-        // Until then a Push cannot exist on the wire anyway.
         #[serde(flatten)]
-        #[ts(skip)]
+        #[ts(flatten)]
         evt: Evt,
     },
 }

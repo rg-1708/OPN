@@ -8,8 +8,10 @@ pub mod cmd;
 pub mod envelope;
 pub mod error;
 pub mod evt;
+pub mod types;
 
-pub use cmd::Cmd;
+pub use cmd::{Cmd, SettingsScope};
 pub use envelope::{ClientFrame, ServerMsg};
 pub use error::{ErrBody, ErrCode};
 pub use evt::{Evt, EvtClass};
+pub use types::{AppAccountInfo, CharacterInfo, DeviceInfo, MePayload, SessionMintResponse};

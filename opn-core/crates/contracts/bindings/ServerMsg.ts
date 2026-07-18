@@ -13,4 +13,8 @@ export type ServerMsg = { reply_to: number, ok: boolean,
  * command lands a concrete type (roadmap Sprint 0 rule) — never
  * beyond the sprint that adds the command.
  */
-payload?: JsonValue, err?: Err, } | { topic: string, };
+payload?: JsonValue, err?: Err, } | { topic: string, } & ({ "evt": "presence.state", "payload": { character_id: string, online: boolean | null, 
+/**
+ * RFC 3339; present only in `online: false` transitions.
+ */
+last_seen_at: string | null, } });
