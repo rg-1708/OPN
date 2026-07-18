@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 use super::Fail;
 use crate::infra::auth::Identity;
+use crate::infra::cursor::{self, Cursor, Page};
 use crate::infra::db::world_tx;
 use crate::infra::ids::new_id;
 use crate::infra::timefmt::rfc3339;
@@ -125,34 +126,55 @@ struct InboxRow {
     created_at: OffsetDateTime,
 }
 
-/// `GET /v1/notify/inbox?limit` — newest-first inbox page. `?limit` only this
-/// sprint; the cursor idiom (Sprint 4) replaces it with keyset paging on the
-/// `inbox_recipient` index.
-// ponytail: newest-N, no paging. Sprint 4 item 1 swaps this for the shared
-// cursor util (roadmap Sprint 3 item 1 TODO — closed there).
-pub async fn inbox_list(pool: &PgPool, who: &Identity, limit: i64) -> Result<Vec<InboxItem>, Fail> {
-    let limit = limit.clamp(1, 100);
+/// `GET /v1/notify/inbox?cursor&limit` — newest-first inbox page on the shared
+/// cursor idiom (CDR-7, roadmap Sprint 4 item 1, closing Sprint 3's TODO).
+/// Keysets on `(created_at, id)` descending; overfetches one row so `page`
+/// can emit the next cursor.
+pub async fn inbox_list(
+    pool: &PgPool,
+    who: &Identity,
+    cursor: Option<Cursor>,
+    limit: i64,
+) -> Result<Page<InboxItem>, Fail> {
+    let limit = limit.clamp(1, 100) as usize;
+    // NULL cursor ts short-circuits the predicate; the id bind is then unused.
+    let (cur_ts, cur_id) = match &cursor {
+        Some(c) => (Some(c.ts), c.id),
+        None => (None, Uuid::nil()),
+    };
     let mut tx = world_tx(pool, who.world_id).await?;
     let rows: Vec<InboxRow> = sqlx::query_as(
         "SELECT id, app_id, kind, class, payload, seen_at, created_at FROM inbox \
-         WHERE character_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2",
+         WHERE character_id = $1 \
+           AND ($2::timestamptz IS NULL OR (created_at, id) < ($2, $3)) \
+         ORDER BY created_at DESC, id DESC LIMIT $4",
     )
     .bind(who.character_id)
-    .bind(limit)
+    .bind(cur_ts)
+    .bind(cur_id)
+    .bind(limit as i64 + 1)
     .fetch_all(&mut *tx)
     .await?;
-    Ok(rows
-        .into_iter()
-        .map(|r| InboxItem {
-            id: r.id,
-            app_id: r.app_id,
-            kind: r.kind,
-            class: parse_class(&r.class),
-            payload: r.payload,
-            seen_at: r.seen_at.map(rfc3339),
-            created_at: rfc3339(r.created_at),
-        })
-        .collect())
+
+    // Page over the raw rows (they carry the OffsetDateTime the cursor needs),
+    // then project to the wire type.
+    let paged = cursor::page(rows, limit, |r| (r.created_at, r.id));
+    Ok(Page {
+        items: paged
+            .items
+            .into_iter()
+            .map(|r| InboxItem {
+                id: r.id,
+                app_id: r.app_id,
+                kind: r.kind,
+                class: parse_class(&r.class),
+                payload: r.payload,
+                seen_at: r.seen_at.map(rfc3339),
+                created_at: rfc3339(r.created_at),
+            })
+            .collect(),
+        next_cursor: paged.next_cursor,
+    })
 }
 
 fn class_str(c: NotifyClass) -> &'static str {

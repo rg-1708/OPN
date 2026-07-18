@@ -48,12 +48,23 @@ pub fn class_of(cmd: &contracts::Cmd) -> Class {
         | Cmd::IdentityMe
         | Cmd::IdentityGetSettings { .. }
         | Cmd::ChannelsList
+        // Receipts are high-frequency, cheap watermark bumps — read-rate fits.
+        | Cmd::ChannelsMarkDelivered { .. }
+        | Cmd::ChannelsMarkRead { .. }
         | Cmd::NotifySeen { .. } => Class::Read,
         Cmd::IdentityAppLogin { .. }
         | Cmd::IdentitySetSettings { .. }
         | Cmd::IdentitySetSharePresence { .. }
         | Cmd::ChannelsOpenDirect { .. }
         | Cmd::ChannelsCreate { .. }
+        // Typing self-limits to ~1/3 s; reactions/pins/members are occasional.
+        | Cmd::ChannelsTyping { .. }
+        | Cmd::ChannelsReact { .. }
+        | Cmd::ChannelsUnreact { .. }
+        | Cmd::ChannelsPin { .. }
+        | Cmd::ChannelsUnpin { .. }
+        | Cmd::ChannelsMemberAdd { .. }
+        | Cmd::ChannelsMemberRemove { .. }
         | Cmd::NotifyClear => Class::Social,
         // The hot path — its own class with a message-rate budget (§12).
         Cmd::ChannelsSend { .. } => Class::Msg,

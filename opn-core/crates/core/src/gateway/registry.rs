@@ -107,6 +107,24 @@ impl ConnHandle {
         }
     }
 
+    /// Durable delivery that *waits* for queue capacity instead of closing on
+    /// a transiently full queue. Resume replay (§4.4) enqueues up to
+    /// `RESUME_MAX` durable frames from the dispatch task faster than the
+    /// writer drains — the `send_evt` slow-consumer close would then kill a
+    /// perfectly healthy client mid-catch-up (the burst is the *server's*, not
+    /// a slow reader's). Awaiting the permit backpressures the replay to the
+    /// client's drain rate; a genuinely dead client drops the receiver, so
+    /// `reserve` errors and we return `false` for the caller to stop.
+    async fn push_awaiting(&self, frame: Arc<str>) -> bool {
+        match self.tx.reserve().await {
+            Ok(permit) => {
+                permit.send(frame);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
     /// Class-aware event delivery (§4.3): durable + full queue closes the
     /// connection; ephemeral drops silently below ~20 % headroom.
     fn send_evt(&self, frame: Arc<str>, class: EvtClass) {
@@ -255,8 +273,32 @@ impl SessionRegistry {
         handle.send_evt(serialize_push(topic, evt), evt.class());
     }
 
+    /// Resume-replay push (§4.4): like `push_to` but backpressures on a full
+    /// queue instead of closing (see `ConnHandle::push_awaiting`). Returns
+    /// `false` if the connection went away mid-replay, so the caller stops.
+    pub async fn push_to_awaiting(&self, handle: &Arc<ConnHandle>, topic: &str, evt: &Evt) -> bool {
+        handle.push_awaiting(serialize_push(topic, evt)).await
+    }
+
     pub fn get(&self, session_id: Uuid) -> Option<Arc<ConnHandle>> {
         self.sessions.get(&session_id).map(|h| h.clone())
+    }
+
+    /// Drop a character's subscription to one topic across all their live
+    /// sessions — used when a member is removed from a group so their socket
+    /// stops receiving at once (§10.2), without waiting for them to unsub.
+    /// O(live sessions of that character); collect handles first so we do not
+    /// hold a `DashMap` iterator across the `unsubscribe` mutations.
+    pub fn drop_character_topic(&self, world: Uuid, character: Uuid, topic: &str) {
+        let handles: Vec<Arc<ConnHandle>> = self
+            .sessions
+            .iter()
+            .filter(|h| h.identity.world_id == world && h.identity.character_id == character)
+            .map(|h| h.clone())
+            .collect();
+        for h in handles {
+            self.unsubscribe(topic, &h);
+        }
     }
 
     /// Presence refresh support: one pass over live connections

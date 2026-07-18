@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use uuid::Uuid;
 
-use crate::types::NotifyClass;
+use crate::types::{NotifyClass, ReceiptKind};
 
 /// Every server→client pushed event. Same tagging idiom as `Cmd`.
 ///
@@ -50,6 +50,61 @@ pub enum Evt {
         #[ts(type = "unknown")]
         payload: serde_json::Value,
     },
+
+    /// A member's delivered/read watermark moved (§10.2), fanned out on
+    /// `ch:<channel_id>`. Durable: it drives unread counts, which must not
+    /// silently desync.
+    #[serde(rename = "channels.receipt")]
+    ChannelsReceipt {
+        channel_id: Uuid,
+        character_id: Uuid,
+        kind: ReceiptKind,
+        #[ts(type = "number")]
+        up_to_seq: i64,
+        /// RFC 3339 server timestamp.
+        at: String,
+    },
+
+    /// "Is typing" ping on `ch:<channel_id>` (§10.2). Ephemeral: a lost one
+    /// costs nothing, and a slow consumer must not be closed over it.
+    #[serde(rename = "channels.typing")]
+    ChannelsTyping {
+        channel_id: Uuid,
+        character_id: Uuid,
+    },
+
+    /// A reaction was added or removed (§10.2). Durable — reaction state is
+    /// part of the message the client renders.
+    #[serde(rename = "channels.reaction")]
+    ChannelsReaction {
+        channel_id: Uuid,
+        message_id: Uuid,
+        character_id: Uuid,
+        emoji: String,
+        added: bool,
+    },
+
+    /// A message was pinned or unpinned (§10.2). Durable.
+    #[serde(rename = "channels.pin")]
+    ChannelsPin {
+        channel_id: Uuid,
+        message_id: Uuid,
+        by: Uuid,
+        pinned: bool,
+    },
+
+    /// A group's membership changed (§10.2). Durable.
+    #[serde(rename = "channels.member")]
+    ChannelsMember {
+        channel_id: Uuid,
+        character_id: Uuid,
+        added: bool,
+    },
+
+    /// Resume replay hit its 500-row cap (§4.4): the client's gap is larger
+    /// than one replay, so it should cold-load history over HTTP. Durable.
+    #[serde(rename = "channels.resume_overflow")]
+    ChannelsResumeOverflow { channel_id: Uuid },
 }
 
 /// Backpressure class (OPN-CORE.md §4.3): durable events close a slow
@@ -75,6 +130,20 @@ impl Evt {
             // close a consumer too slow for them; it re-syncs the durable
             // truth on reconnect (channel watermarks, inbox, /calls/active).
             Evt::NotifyEvent { .. } => EvtClass::Durable,
+            // Receipts drive unread counts; a dropped one desyncs the badge
+            // until a full re-list. Close the slow consumer instead.
+            Evt::ChannelsReceipt { .. } => EvtClass::Durable,
+            // Typing is pure presentation garnish — drop it under pressure.
+            Evt::ChannelsTyping { .. } => EvtClass::Ephemeral,
+            // Reaction/pin/member changes are part of the durable channel
+            // state the client renders; a lost one is a wrong render until
+            // re-sync, so close rather than drop.
+            Evt::ChannelsReaction { .. } => EvtClass::Durable,
+            Evt::ChannelsPin { .. } => EvtClass::Durable,
+            Evt::ChannelsMember { .. } => EvtClass::Durable,
+            // The "cold-load, you overflowed" signal must arrive or the client
+            // silently keeps a gap.
+            Evt::ChannelsResumeOverflow { .. } => EvtClass::Durable,
         }
     }
 }

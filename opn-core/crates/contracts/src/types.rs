@@ -96,6 +96,37 @@ pub struct ChannelSummary {
     pub last_delivered_seq: i64,
     pub muted: bool,
     pub last_message: Option<MessagePreview>,
+    /// For `dm` channels: the other party's last-seen (RFC 3339), gated on
+    /// their `share_presence` — `null` for groups, or when they don't share
+    /// (§10.2). Read-time honored, so a presence toggle takes effect on the
+    /// next list.
+    #[ts(type = "string | null")]
+    pub last_seen_at: Option<String>,
+}
+
+/// One message row in a `GET /v1/channels/:id/messages` history page (§6).
+/// Seq-keyed (not the time cursor) — seq is already public in this contract.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct MessageItem {
+    pub message_id: Uuid,
+    #[ts(type = "number")]
+    pub seq: i64,
+    pub sender: Uuid,
+    #[ts(type = "unknown")]
+    pub body: serde_json::Value,
+    pub at: String,
+}
+
+/// Which watermark a `channels.receipt` event carries (§10.2). `delivered` is
+/// device-received; `read` is user-read. Both monotonic, both watermark-only
+/// (never per-message rows).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum ReceiptKind {
+    Delivered,
+    Read,
 }
 
 // ── notify (OPN-CORE.md §10.8) ───────────────────────────────────────────────

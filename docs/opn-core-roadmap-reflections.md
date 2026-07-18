@@ -6,6 +6,182 @@ to OPN-CORE.md as CDRs — this file records *how the build actually went*.
 
 ---
 
+## 2026-07-18 (evening) — Sprint 4 **part A** (channels feature-complete + cursor idiom): built, green; loadgen (part B) deferred
+
+Deliberate stop mid-sprint. Sprint 4 has two disjoint halves: **(A)** the
+messaging surface goes feature-complete and the one pagination idiom lands, and
+**(B)** `opn-loadgen` v0 + the nightly perf smoke. Part B is a whole separate
+crate whose exit criterion ("nightly smoke green three consecutive nights")
+cannot even *finish* in one session, so this session did all of A, stopped, and
+reflected. This is pacing within a sprint, not a scope-shrink to a later sprint
+— no roadmap amendment needed (item 9 stays in Sprint 4).
+
+### What exists now
+
+- **Migration `0006_reactions_pins.sql`** — the two tables deferred from Sprint 3
+  (decision 5 there). Both carry the 0001 NULLIF RLS convention. Neither
+  foreign-keys `messages` (partitioned parent → PK `(id, created_at)` makes a
+  bare `message_id` FK impossible); handlers validate message existence with an
+  RLS-scoped `SELECT` instead. `reactions` PK `(message_id, character_id,
+  emoji)`; `channel_pins` PK `(channel_id, message_id)`, the 50-cap enforced
+  in-handler under the channel row lock, not by a constraint.
+- **`infra/cursor.rs`** — the one pagination idiom (CDR-7): opaque base64url of
+  a `(micros, uuid)` keyset pair, `encode`/`decode` (malformed → `invalid`,
+  never a panic), and a generic `page<T>(rows, limit, key)` that takes the
+  `limit + 1` overfetch and emits the next cursor from the last kept row. Every
+  time-ordered read from here on (feed/gallery/ledger) uses it. **Inbox
+  retrofitted onto it** — closes the Sprint 3 `?limit`-only TODO.
+- **`primitives/channels/` grew the whole feature surface** (`store.rs` SQL +
+  `mod.rs` handlers): receipts (`mark_delivered`/`mark_read`, monotonic
+  watermark clamped to `last_seq`, event only on real advance), typing
+  (ephemeral), reactions (`react`/`unreact`, change-only events, emoji
+  allow-check), pins (`pin`/`unpin`, cap-50 under the channel `FOR UPDATE`
+  lock), members (`member_add`/`member_remove`, group-only), `resume_replay`,
+  `history`, and DM counterpart `last_seen_at` in `channels.list` (share-presence
+  gated at read time).
+- **Resume replay wired into the `sub ch:` dispatch arm** (§4.4): authorize →
+  register → replay `seq > last_seq` (ascending, cap 500) as `channels.message`
+  events **before** the sub ack → `channels.resume_overflow` if the 500 cap is
+  hit exactly.
+- **`http/channels.rs`** — `GET /v1/channels/{id}/messages?before_seq&limit`
+  (JWT, membership-gated, seq-keyset descending, limit clamped 100). The one
+  seq-keyed read (seq is already public in that contract; the time cursor is for
+  time-ordered surfaces).
+- **`registry::push_to_awaiting`** — backpressuring durable push for resume (see
+  the bug below), and `registry::drop_character_topic` — drops a removed
+  member's live `ch:` subscription across their sessions.
+- **Contracts** — 9 new `channels.*` `Cmd`s, 6 new `Evt`s (each declaring its
+  `class()`), `ReceiptKind` + `MessageItem` types, `ChannelSummary.last_seen_at`.
+  Bindings regenerated (`MessageItem`/`ReceiptKind` needed explicit `export_ts`
+  entries — `MessageItem` rides HTTP, unreachable from the Cmd/Evt graph).
+- **Wiring** — dispatch arms + `wire_name`, `class_of` (receipts→Read,
+  everything else social; send stays Msg), `Cmd`/`Evt` coverage match-tests
+  extended.
+- **Tests** — **115 green across the workspace** (was 96; +2 `#[ignore]`
+  soak/bench). New: 4 `cursor` unit tests + 13 integration across four disjoint
+  files — `channels_receipts` (3), `channels_reactions_pins` (3),
+  `channels_members_resume` (4), `channels_history` (3).
+
+### Decisions closed during implementation
+
+1. **Watermarks clamp to `channels.last_seq`**, not just monotonic-guard. A
+   client marking `up_to_seq = 99` on a 3-message channel sets the watermark to
+   3, never 99 — `SET last_read_seq = LEAST($s, (SELECT last_seq …))`. Marking
+   past what exists would count unsent-future messages as read.
+2. **Receipt emits only on a real advance.** A regress/repeat is an idempotent
+   `ok` ack with no event; the mark handler returns `Option<seq>` (`Some` =
+   advanced → emit, `None` = member no-op, `Err(Forbidden)` = non-member). The
+   member-vs-nonmember distinction needs one extra indexed read on the no-op
+   path because a zero-row guarded UPDATE can't tell "already read" from "not a
+   member".
+3. **Every change-only handler (react/pin/member) returns `changed: bool` and
+   emits exactly one event per real change.** A duplicate add / absent remove is
+   a silent no-op — no event spam, and the tests pin `expect_no_evt` on the
+   repeat.
+4. **Member removal publishes the `added:false` event *before* dropping the
+   member's subscription**, so the removed member receives their own removal
+   notice on the way out, then their socket goes quiet. Ordering matters: drop
+   first and they'd never learn they were removed over `ch:`.
+5. **Emoji validation is a byte-cap + no-control/whitespace check, not a
+   grapheme segmenter.** The roadmap says "small grapheme allow-pattern, not an
+   emoji database" — true grapheme-cluster validation (ZWJ sequences) needs
+   `unicode-segmentation`; deferred behind a `ponytail:` note until a real emoji
+   is rejected.
+6. **`last_seen_at` in `channels.list` is DM-only and share-presence-gated in
+   SQL** (a `CASE WHEN pc.share_presence THEN …` lateral). `identity.me`'s own
+   last-seen was skipped as YAGNI — a character's own last-seen is meaningless
+   while they're online, and no v1 surface reads it.
+7. **`react`/`pin`/`unreact` do not FK `messages`** (partitioned); message
+   existence is an RLS-scoped `EXISTS`. Documented in `0006` so the next dev
+   doesn't "add the missing FK".
+8. **Inbox now returns `{ items, next_cursor }`**, not a bare array — the one
+   existing Sprint 3 test (`inbox_http_returns_items`) was updated for the new
+   envelope. No other consumer exists yet, so the contract change is free now.
+
+### The bug the resume test caught (the session's keeper)
+
+The **`channels_members_resume` agent found a real product bug** in
+`resume_replay`, exactly the kind desk-checking misses:
+
+> `resume_replay` bursts up to `RESUME_MAX` (500) `+ 1` **durable** frames into
+> the per-connection send queue in a tight loop with no `.await`/drain. But
+> `sendq_capacity` defaults to **256**. At the 257th push the queue is full, the
+> durable-into-full guard trips `close(SLOW_CONSUMER)` (4409), and a perfectly
+> healthy client is killed mid-catch-up — the exact moment resume exists to
+> serve. Deterministic on the current-thread test runtime; a latent race in
+> prod's multi-thread runtime under any brief socket stall during a ≥256-row
+> replay.
+
+The root cause is a category error in the backpressure policy: the slow-consumer
+close assumes a *slow reader*, but a full-cap replay is the **server** bursting
+faster than the writer drains, not the client being slow. Fix:
+`registry::push_to_awaiting` — resume uses `tx.reserve().await` to *wait* for
+queue capacity instead of closing, backpressuring the replay to the client's
+drain rate; a genuinely dead socket drops the receiver, `reserve` errors, and
+the replay stops. `send`/ack paths keep their fail-fast close-on-full (a real
+slow reader still gets closed). The agent's test was `#[ignore]`d with the bug
+written up; the fix un-ignored it, and it's now green (500 messages + overflow).
+
+This is the third sprint running where the independent test leg caught a defect
+the main thread shipped — and the first where the finding was a *runtime
+concurrency* bug (queue capacity vs replay burst), not a spec contradiction or a
+stale assertion. "Real-runtime-catches-desk-checks" now extends past Postgres to
+the async scheduler.
+
+### Exit criteria status (Sprint 4)
+
+| Criterion | Status |
+|---|---|
+| Every `channels.*` command in the coverage match-test | **PASS** — all 9 new commands + 6 events named; `tests/coverage.rs` exhaustive match compiles. |
+| Nightly perf smoke live and green three consecutive nights | **OPEN** — depends on `opn-loadgen` v0 (part B, next session). |
+| Messages surface demo-able end to end vs the shell dev build | **N/A this session** — coordination point with opn-ui, explicitly not a blocker. The four new integration suites are the in-repo end-to-end proof. |
+
+Clippy `-D warnings` clean, `cargo fmt --check` clean, full suite green against
+the live stack. CI-on-a-remote / first push still open (no push this session),
+so the drift gate stays unarmed; bindings are regenerated and commit-ready.
+
+### Reflection
+
+- **The recipe held at four agents.** Main thread wrote all the coupled core
+  (migration, contracts, store SQL, handlers, resume wiring, the cursor util);
+  four opus agents each owned exactly one `tests/*.rs` and nobody touched
+  `common/`. Zero merge conflicts across four parallel files. Three agents found
+  nothing (the code survived their adversarial tests); the fourth found the
+  resume bug — the value of the independent leg is entirely in that one catch,
+  and it paid for all four.
+- **"Report the bug, don't fix it" was the right instruction.** The agent
+  `#[ignore]`d its failing test with a precise root-cause writeup and left the
+  product alone, so the main thread owned the fix (a backpressure-policy call
+  that touches the registry's core invariant — not something to delegate). The
+  fix + un-ignore was ~15 lines and one test edit.
+- **Seed-via-SQL beat seed-via-WS for volume.** Pins-at-49 and resume-at-500
+  need many message rows; the send path is rate-limited (Msg class ~1/s), so the
+  agents were told to `INSERT` message rows directly through `world_tx`. Worth
+  remembering for every future "needs N rows" test.
+- **Splitting the sprint was the right call.** Part A is a coherent, shippable
+  milestone (the messaging surface a client actually uses); part B (loadgen) is
+  infra with a multi-night exit criterion. Bundling them would have produced a
+  worse loadgen under time pressure and a less-reviewed feature set.
+- **Not committed** — Sprint 4A left in the tree with Sprints 0–3. Committing +
+  first push (which arms CI and the drift gate, open since Sprint 0) remains the
+  operator's call; the pile is now four sprints tall.
+
+### Next session
+
+1. **Sprint 4 part B** — `opn-loadgen` v0 (`crates/loadgen`): tokio binary
+   reusing `contracts`, TOML scenario config, `--seed` mode hitting the mint
+   API, per-conn behavior script, hdrhistogram ack RTT + event-delivery latency,
+   JSON summary line. Then wire the nightly CI perf smoke (300 conns, 30 msg/s,
+   5 min, p99 ack < 25 ms, zero durable closes) — cross-cutting rule 5. Its exit
+   criterion needs three green nights, so it must land before it can close.
+2. Then **Sprint 5** (Media + directory), which un-gates the `channels`
+   attachment check (Sprint 3 decision 6) into the real owned+live count.
+3. Still open, minor: online-member badging (Sprint 3 decision 9), the
+   Bearer-scheme case-sensitivity shared with `TenantAuth`, and the
+   `identity.me` own-last-seen (decision 6 above) — all deferred, none blocking.
+
+---
+
 ## 2026-07-18 (later again) — Sprint 3 (Notify + channels hot path): built, all exit criteria pass
 
 The product's spine. A message is now persisted, sequenced, acked, fanned out

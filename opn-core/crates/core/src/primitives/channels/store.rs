@@ -1,7 +1,7 @@
 //! channels SQL (OPN-CORE.md §8, §10.2). Flat `pub async fn`s over the pool;
 //! the handler layer in `mod.rs` does validation and post-commit fan-out.
 
-use contracts::types::{ChannelSummary, MessagePreview};
+use contracts::types::{ChannelSummary, MessageItem, MessagePreview, ReceiptKind};
 use contracts::ErrCode;
 use sqlx::PgPool;
 use time::OffsetDateTime;
@@ -267,10 +267,14 @@ struct SummaryRow {
     lm_sender: Option<Uuid>,
     lm_body: Option<serde_json::Value>,
     lm_created_at: Option<OffsetDateTime>,
+    peer_last_seen: Option<OffsetDateTime>,
 }
 
 /// The caller's memberships (§10.2): channel row + own watermarks + a
 /// last-message preview via a lateral join, one query, newest thread first.
+/// For `dm` threads the second lateral pulls the other party's last-seen,
+/// already gated on their `share_presence` (roadmap Sprint 4 item 10) — so a
+/// non-sharing peer reads as `NULL`, indistinguishable from never-seen.
 pub async fn list_memberships(
     pool: &PgPool,
     world: Uuid,
@@ -281,13 +285,21 @@ pub async fn list_memberships(
         "SELECT c.id, c.kind, c.name, c.last_seq, \
                 m.last_read_seq, m.last_delivered_seq, m.muted, \
                 lm.seq AS lm_seq, lm.sender_character AS lm_sender, \
-                lm.body AS lm_body, lm.created_at AS lm_created_at \
+                lm.body AS lm_body, lm.created_at AS lm_created_at, \
+                peer.last_seen AS peer_last_seen \
          FROM channel_members m \
          JOIN channels c ON c.id = m.channel_id \
          LEFT JOIN LATERAL ( \
              SELECT seq, sender_character, body, created_at FROM messages \
              WHERE channel_id = c.id ORDER BY seq DESC LIMIT 1 \
          ) lm ON true \
+         LEFT JOIN LATERAL ( \
+             SELECT CASE WHEN pc.share_presence THEN pc.last_seen_at END AS last_seen \
+             FROM channel_members pm \
+             JOIN characters pc ON pc.id = pm.character_id \
+             WHERE c.kind = 'dm' AND pm.channel_id = c.id AND pm.character_id <> $1 \
+             LIMIT 1 \
+         ) peer ON true \
          WHERE m.character_id = $1 \
          ORDER BY COALESCE(lm.created_at, c.created_at) DESC",
     )
@@ -314,6 +326,7 @@ pub async fn list_memberships(
                 }),
                 _ => None,
             },
+            last_seen_at: r.peer_last_seen.map(rfc3339),
         })
         .collect())
 }
@@ -335,4 +348,358 @@ pub async fn is_member(
     .fetch_optional(&mut *tx)
     .await?;
     Ok(found.is_some())
+}
+
+// sqlx 0.9 wants `'static` SQL (no `&format!`), so the two watermark columns
+// are two literal statements picked by `match` rather than an interpolated
+// column name (reflections 2026-07-18, Sprint 1 decision 7).
+const MARK_DELIVERED_SQL: &str =
+    "UPDATE channel_members SET last_delivered_seq = LEAST($3, (SELECT last_seq FROM channels WHERE id = $1)) \
+     WHERE channel_id = $1 AND character_id = $2 \
+       AND last_delivered_seq < LEAST($3, (SELECT last_seq FROM channels WHERE id = $1)) \
+     RETURNING last_delivered_seq";
+const MARK_READ_SQL: &str =
+    "UPDATE channel_members SET last_read_seq = LEAST($3, (SELECT last_seq FROM channels WHERE id = $1)) \
+     WHERE channel_id = $1 AND character_id = $2 \
+       AND last_read_seq < LEAST($3, (SELECT last_seq FROM channels WHERE id = $1)) \
+     RETURNING last_read_seq";
+
+/// Advance a watermark monotonically (§10.2), clamped to the channel's
+/// `last_seq` so a client can never mark past what exists. Returns:
+/// - `Some(seq)` — the watermark moved to `seq`; the caller emits a receipt.
+/// - `None` — the caller is a member but the watermark did not move (a regress
+///   or repeat); idempotent no-op, no event.
+/// - `Err(Forbidden)` — the caller is not a member (or the channel is
+///   RLS-hidden), indistinguishable from a foreign channel.
+pub async fn mark_watermark(
+    pool: &PgPool,
+    world: Uuid,
+    channel_id: Uuid,
+    character: Uuid,
+    kind: ReceiptKind,
+    up_to_seq: i64,
+) -> Result<Option<i64>, Fail> {
+    let sql = match kind {
+        ReceiptKind::Delivered => MARK_DELIVERED_SQL,
+        ReceiptKind::Read => MARK_READ_SQL,
+    };
+    let mut tx = world_tx(pool, world).await?;
+    let moved: Option<i64> = sqlx::query_scalar(sql)
+        .bind(channel_id)
+        .bind(character)
+        .bind(up_to_seq)
+        .fetch_optional(&mut *tx)
+        .await?;
+    if moved.is_some() {
+        tx.commit().await?;
+        return Ok(moved);
+    }
+    // No move: distinguish a member no-op from a non-member. One indexed read.
+    let member: Option<i32> = sqlx::query_scalar(
+        "SELECT 1 FROM channel_members WHERE channel_id = $1 AND character_id = $2",
+    )
+    .bind(channel_id)
+    .bind(character)
+    .fetch_optional(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    if member.is_some() {
+        Ok(None)
+    } else {
+        Err(Fail::Code(ErrCode::Forbidden))
+    }
+}
+
+/// Membership + "this message is in this channel" in one round trip. Returns
+/// `Forbidden` for a non-member, `NotFound` for a message not in the channel
+/// (or RLS-hidden). Shared by react and pin.
+async fn member_and_message(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    channel_id: Uuid,
+    character: Uuid,
+    message_id: Uuid,
+) -> Result<(), Fail> {
+    let row: (bool, bool) = sqlx::query_as(
+        "SELECT \
+           EXISTS(SELECT 1 FROM channel_members WHERE channel_id = $1 AND character_id = $2), \
+           EXISTS(SELECT 1 FROM messages WHERE id = $3 AND channel_id = $1)",
+    )
+    .bind(channel_id)
+    .bind(character)
+    .bind(message_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    if !row.0 {
+        return Err(Fail::Code(ErrCode::Forbidden));
+    }
+    if !row.1 {
+        return Err(Fail::Code(ErrCode::NotFound));
+    }
+    Ok(())
+}
+
+/// Add or remove a reaction (§10.2), keyed `(message_id, character, emoji)`.
+/// Returns `true` if the set actually changed (so the caller emits exactly one
+/// event); a repeat add / absent remove is a `false` no-op.
+pub async fn react(
+    pool: &PgPool,
+    world: Uuid,
+    channel_id: Uuid,
+    character: Uuid,
+    message_id: Uuid,
+    emoji: &str,
+    add: bool,
+) -> Result<bool, Fail> {
+    let mut tx = world_tx(pool, world).await?;
+    member_and_message(&mut tx, channel_id, character, message_id).await?;
+    let changed = if add {
+        sqlx::query(
+            "INSERT INTO reactions (world_id, channel_id, message_id, character_id, emoji) \
+             VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
+        )
+        .bind(world)
+        .bind(channel_id)
+        .bind(message_id)
+        .bind(character)
+        .bind(emoji)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            > 0
+    } else {
+        sqlx::query(
+            "DELETE FROM reactions \
+             WHERE message_id = $1 AND character_id = $2 AND emoji = $3",
+        )
+        .bind(message_id)
+        .bind(character)
+        .bind(emoji)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            > 0
+    };
+    tx.commit().await?;
+    Ok(changed)
+}
+
+/// Max pinned messages per channel (§10.2). At the cap a new pin is `Conflict`.
+const PINS_MAX: i64 = 50;
+
+/// Pin or unpin a message (§10.2). The channel row is locked `FOR UPDATE`
+/// first: it is already the send serialization point, so counting under it
+/// closes the count-then-insert race at the 50 cap without a table lock.
+/// Returns whether the pin set changed (one event per real change).
+pub async fn pin(
+    pool: &PgPool,
+    world: Uuid,
+    channel_id: Uuid,
+    character: Uuid,
+    message_id: Uuid,
+    add: bool,
+) -> Result<bool, Fail> {
+    let mut tx = world_tx(pool, world).await?;
+    // Lock the channel (existence + serialization). RLS-hidden → NotFound.
+    let locked: Option<i32> = sqlx::query_scalar("SELECT 1 FROM channels WHERE id = $1 FOR UPDATE")
+        .bind(channel_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    if locked.is_none() {
+        return Err(Fail::Code(ErrCode::NotFound));
+    }
+
+    let changed = if add {
+        member_and_message(&mut tx, channel_id, character, message_id).await?;
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM channel_pins WHERE channel_id = $1")
+                .bind(channel_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        if count >= PINS_MAX {
+            return Err(Fail::Code(ErrCode::Conflict));
+        }
+        sqlx::query(
+            "INSERT INTO channel_pins (channel_id, world_id, message_id, pinned_by) \
+             VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+        )
+        .bind(channel_id)
+        .bind(world)
+        .bind(message_id)
+        .bind(character)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            > 0
+    } else {
+        // Unpin only needs membership, not message-in-channel (the pin row
+        // implies it) — but a non-member must still not touch pins.
+        let member: Option<i32> = sqlx::query_scalar(
+            "SELECT 1 FROM channel_members WHERE channel_id = $1 AND character_id = $2",
+        )
+        .bind(channel_id)
+        .bind(character)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if member.is_none() {
+            return Err(Fail::Code(ErrCode::Forbidden));
+        }
+        sqlx::query("DELETE FROM channel_pins WHERE channel_id = $1 AND message_id = $2")
+            .bind(channel_id)
+            .bind(message_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            > 0
+    };
+    tx.commit().await?;
+    Ok(changed)
+}
+
+/// Add or remove a group member (§10.2). Group kind only (`Conflict` on
+/// dm/sms); the actor must be a member (`Forbidden`); the target must be a
+/// character of this world (`Invalid`). Returns whether membership changed.
+pub async fn member_change(
+    pool: &PgPool,
+    world: Uuid,
+    channel_id: Uuid,
+    actor: Uuid,
+    target: Uuid,
+    add: bool,
+) -> Result<bool, Fail> {
+    let mut tx = world_tx(pool, world).await?;
+
+    // Lock + kind check: RLS-hidden/unknown → NotFound; non-group → Conflict.
+    let kind: Option<String> =
+        sqlx::query_scalar("SELECT kind FROM channels WHERE id = $1 FOR UPDATE")
+            .bind(channel_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    match kind.as_deref() {
+        None => return Err(Fail::Code(ErrCode::NotFound)),
+        Some("group") => {}
+        Some(_) => return Err(Fail::Code(ErrCode::Conflict)),
+    }
+
+    // Actor must be a member.
+    let actor_member: Option<i32> = sqlx::query_scalar(
+        "SELECT 1 FROM channel_members WHERE channel_id = $1 AND character_id = $2",
+    )
+    .bind(channel_id)
+    .bind(actor)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if actor_member.is_none() {
+        return Err(Fail::Code(ErrCode::Forbidden));
+    }
+
+    let changed = if add {
+        // Target must be a real character of this world (RLS-scoped).
+        let exists: Option<i32> = sqlx::query_scalar("SELECT 1 FROM characters WHERE id = $1")
+            .bind(target)
+            .fetch_optional(&mut *tx)
+            .await?;
+        if exists.is_none() {
+            return Err(Fail::Code(ErrCode::Invalid));
+        }
+        sqlx::query(
+            "INSERT INTO channel_members (channel_id, world_id, character_id) \
+             VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+        )
+        .bind(channel_id)
+        .bind(world)
+        .bind(target)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            > 0
+    } else {
+        sqlx::query("DELETE FROM channel_members WHERE channel_id = $1 AND character_id = $2")
+            .bind(channel_id)
+            .bind(target)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            > 0
+    };
+    tx.commit().await?;
+    Ok(changed)
+}
+
+#[derive(sqlx::FromRow)]
+struct MsgRow {
+    id: Uuid,
+    seq: i64,
+    sender_character: Uuid,
+    body: serde_json::Value,
+    created_at: OffsetDateTime,
+}
+
+impl From<MsgRow> for MessageItem {
+    fn from(r: MsgRow) -> MessageItem {
+        MessageItem {
+            message_id: r.id,
+            seq: r.seq,
+            sender: r.sender_character,
+            body: r.body,
+            at: rfc3339(r.created_at),
+        }
+    }
+}
+
+/// Resume replay (§4.4): messages after `after_seq`, ascending, capped. The
+/// sub authorization already ran in dispatch, so no membership check here. The
+/// caller pushes these as `channels.message` events before the sub ack and, if
+/// the cap is hit exactly, a `channels.resume_overflow`.
+pub async fn replay_since(
+    pool: &PgPool,
+    world: Uuid,
+    channel_id: Uuid,
+    after_seq: i64,
+    limit: i64,
+) -> Result<Vec<MessageItem>, Fail> {
+    let mut tx = world_tx(pool, world).await?;
+    let rows: Vec<MsgRow> = sqlx::query_as(
+        "SELECT id, seq, sender_character, body, created_at FROM messages \
+         WHERE channel_id = $1 AND seq > $2 ORDER BY seq ASC LIMIT $3",
+    )
+    .bind(channel_id)
+    .bind(after_seq)
+    .bind(limit)
+    .fetch_all(&mut *tx)
+    .await?;
+    Ok(rows.into_iter().map(MessageItem::from).collect())
+}
+
+/// History page (§6): messages descending by seq, keyset on `before_seq`.
+/// Membership required (`Forbidden` otherwise). Seq-keyed, not the time cursor.
+pub async fn history(
+    pool: &PgPool,
+    world: Uuid,
+    channel_id: Uuid,
+    character: Uuid,
+    before_seq: Option<i64>,
+    limit: i64,
+) -> Result<Vec<MessageItem>, Fail> {
+    let mut tx = world_tx(pool, world).await?;
+    let member: Option<i32> = sqlx::query_scalar(
+        "SELECT 1 FROM channel_members WHERE channel_id = $1 AND character_id = $2",
+    )
+    .bind(channel_id)
+    .bind(character)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if member.is_none() {
+        return Err(Fail::Code(ErrCode::Forbidden));
+    }
+    let rows: Vec<MsgRow> = sqlx::query_as(
+        "SELECT id, seq, sender_character, body, created_at FROM messages \
+         WHERE channel_id = $1 AND ($2::bigint IS NULL OR seq < $2) \
+         ORDER BY seq DESC LIMIT $3",
+    )
+    .bind(channel_id)
+    .bind(before_seq)
+    .bind(limit)
+    .fetch_all(&mut *tx)
+    .await?;
+    Ok(rows.into_iter().map(MessageItem::from).collect())
 }

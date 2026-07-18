@@ -17,5 +17,7 @@ fn main() {
     // the TS SDK still types them.
     contracts::ChannelSummary::export_all_to(dir).expect("export ChannelSummary");
     contracts::InboxItem::export_all_to(dir).expect("export InboxItem");
+    // History rides HTTP, not the Cmd/Evt graph.
+    contracts::MessageItem::export_all_to(dir).expect("export MessageItem");
     println!("bindings written to {dir}");
 }

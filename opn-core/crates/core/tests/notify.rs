@@ -231,7 +231,10 @@ async fn inbox_http_returns_items(admin: PgPool) {
     let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
         .await
         .expect("body");
-    let items: Vec<InboxItem> = serde_json::from_slice(&bytes).expect("inbox shape");
+    // Cursor idiom (Sprint 4): the inbox now returns `{ items, next_cursor }`.
+    let page: serde_json::Value = serde_json::from_slice(&bytes).expect("inbox shape");
+    let items: Vec<InboxItem> = serde_json::from_value(page["items"].clone()).expect("items array");
+    assert!(page["next_cursor"].is_null(), "single page: {page}");
 
     assert_eq!(items.len(), 1, "one item: {items:?}");
     assert_eq!(items[0].app_id, "messages");

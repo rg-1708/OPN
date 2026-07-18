@@ -81,6 +81,65 @@ pub enum Cmd {
     /// last-message preview).
     #[serde(rename = "channels.list")]
     ChannelsList,
+    /// Advance the caller's delivered watermark (§10.2). Monotonic + idempotent;
+    /// emits `channels.receipt` only when it actually moves.
+    #[serde(rename = "channels.mark_delivered")]
+    ChannelsMarkDelivered {
+        channel_id: Uuid,
+        #[ts(type = "number")]
+        up_to_seq: i64,
+    },
+    /// Advance the caller's read watermark (§10.2). Same monotonic rule.
+    #[serde(rename = "channels.mark_read")]
+    ChannelsMarkRead {
+        channel_id: Uuid,
+        #[ts(type = "number")]
+        up_to_seq: i64,
+    },
+    /// Ephemeral "is typing" ping (§10.2): fanned out, never stored. The client
+    /// self-limits to ~1/3 s; the rate bucket handles abuse.
+    #[serde(rename = "channels.typing")]
+    ChannelsTyping {
+        channel_id: Uuid,
+    },
+    /// Add a reaction, keyed `(message_id, character, emoji)` (§10.2).
+    #[serde(rename = "channels.react")]
+    ChannelsReact {
+        channel_id: Uuid,
+        message_id: Uuid,
+        emoji: String,
+    },
+    /// Remove one of the caller's reactions.
+    #[serde(rename = "channels.unreact")]
+    ChannelsUnreact {
+        channel_id: Uuid,
+        message_id: Uuid,
+        emoji: String,
+    },
+    /// Pin a message (§10.2), cap 50 per channel (`conflict` at the cap).
+    #[serde(rename = "channels.pin")]
+    ChannelsPin {
+        channel_id: Uuid,
+        message_id: Uuid,
+    },
+    #[serde(rename = "channels.unpin")]
+    ChannelsUnpin {
+        channel_id: Uuid,
+        message_id: Uuid,
+    },
+    /// Add a member to a group (§10.2, group kind only). Any member may add.
+    #[serde(rename = "channels.member_add")]
+    ChannelsMemberAdd {
+        channel_id: Uuid,
+        character_id: Uuid,
+    },
+    /// Remove a member from a group. Any member may remove; the removed
+    /// member's live subscription is dropped server-side.
+    #[serde(rename = "channels.member_remove")]
+    ChannelsMemberRemove {
+        channel_id: Uuid,
+        character_id: Uuid,
+    },
 
     // ── notify (§10.8) ───────────────────────────────────────────────────
     #[serde(rename = "notify.seen")]

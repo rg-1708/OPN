@@ -27,6 +27,23 @@ fn every_cmd_names_its_covering_test() {
             Cmd::ChannelsOpenDirect { .. } => "channels::open_direct_found_or_create",
             Cmd::ChannelsCreate { .. } => "channels::create_group_and_list",
             Cmd::ChannelsList => "channels::create_group_and_list",
+            Cmd::ChannelsMarkDelivered { .. } => {
+                "channels_receipts::receipts_both_kinds, ::receipts_monotonic_and_emit"
+            }
+            Cmd::ChannelsMarkRead { .. } => {
+                "channels_receipts::receipts_both_kinds, ::receipts_monotonic_and_emit"
+            }
+            Cmd::ChannelsTyping { .. } => "channels_receipts::typing_delivered_and_authz",
+            Cmd::ChannelsReact { .. } => "channels_reactions_pins::react_add_remove_and_authz",
+            Cmd::ChannelsUnreact { .. } => "channels_reactions_pins::react_add_remove_and_authz",
+            Cmd::ChannelsPin { .. } => "channels_reactions_pins::pins_cap_50",
+            Cmd::ChannelsUnpin { .. } => "channels_reactions_pins::pin_unpin_roundtrip",
+            Cmd::ChannelsMemberAdd { .. } => {
+                "channels_members_resume::member_add_remove_group_only"
+            }
+            Cmd::ChannelsMemberRemove { .. } => {
+                "channels_members_resume::member_remove_drops_subscription"
+            }
             Cmd::NotifySeen { .. } => "notify::seen_marks_rows",
             Cmd::NotifyClear => "notify::clear_empties_inbox",
         }
@@ -41,6 +58,12 @@ fn every_evt_names_its_covering_test() {
             Evt::PresenceState { .. } => "ws::presence_snapshot_and_transitions",
             Evt::ChannelsMessage { .. } => "channels::send_delivers_to_subscriber",
             Evt::NotifyEvent { .. } => "notify::route_pushes_to_online_recipient",
+            Evt::ChannelsReceipt { .. } => "channels_receipts::receipts_monotonic_and_emit",
+            Evt::ChannelsTyping { .. } => "channels_receipts::typing_delivered_and_authz",
+            Evt::ChannelsReaction { .. } => "channels_reactions_pins::react_add_remove_and_authz",
+            Evt::ChannelsPin { .. } => "channels_reactions_pins::pins_cap_50",
+            Evt::ChannelsMember { .. } => "channels_members_resume::member_add_remove_group_only",
+            Evt::ChannelsResumeOverflow { .. } => "channels_members_resume::resume_overflow_at_cap",
         }
     }
     let _ = covering_test;

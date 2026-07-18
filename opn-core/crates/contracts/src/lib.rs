@@ -16,5 +16,5 @@ pub use error::{ErrBody, ErrCode};
 pub use evt::{Evt, EvtClass};
 pub use types::{
     AppAccountInfo, ChannelSummary, CharacterInfo, DeviceInfo, InboxItem, MePayload, MessageBody,
-    MessagePreview, NotifyClass, SessionMintResponse,
+    MessageItem, MessagePreview, NotifyClass, ReceiptKind, SessionMintResponse,
 };

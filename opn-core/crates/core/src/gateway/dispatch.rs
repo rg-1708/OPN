@@ -6,6 +6,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 
+use contracts::types::ReceiptKind;
 use contracts::{Cmd, ErrBody, ErrCode, ServerMsg};
 use metrics::{counter, histogram};
 use serde_json::json;
@@ -121,10 +122,6 @@ async fn run(
             let Some(kind) = TopicKind::parse(&topic) else {
                 return Err(Fail::Code(ErrCode::Invalid));
             };
-            if last_seq.is_some() {
-                // Resume replay lands in Sprint 4; shape is stable now.
-                tracing::debug!(%topic, "sub last_seq accepted and ignored (sprint 4)");
-            }
             match kind {
                 TopicKind::Notify(device) => {
                     // Own device only (§4.4).
@@ -143,10 +140,15 @@ async fn run(
                     Ok(None)
                 }
                 TopicKind::Ch(channel_id) => {
-                    // Membership authz (§4.4); resume replay lands Sprint 4
-                    // (last_seq accepted-and-ignored above).
+                    // Membership authz (§4.4), then register, then — if the
+                    // client sent a watermark — replay the gap before the ack
+                    // (§4.4 snapshot-before-ack). Register first so no live
+                    // event between replay and ack is lost.
                     channels::authorize_sub(state, who, channel_id).await?;
                     state.registry.subscribe(&topic, handle);
+                    if let Some(after) = last_seq {
+                        channels::resume_replay(state, who, handle, channel_id, after).await?;
+                    }
                     Ok(None)
                 }
                 // Owning primitives land in Sprints 6/8.
@@ -201,6 +203,68 @@ async fn run(
                 serde_json::to_value(list).map_err(anyhow::Error::from)?,
             ))
         }
+        Cmd::ChannelsMarkDelivered {
+            channel_id,
+            up_to_seq,
+        } => {
+            channels::mark(state, who, channel_id, ReceiptKind::Delivered, up_to_seq).await?;
+            Ok(None)
+        }
+        Cmd::ChannelsMarkRead {
+            channel_id,
+            up_to_seq,
+        } => {
+            channels::mark(state, who, channel_id, ReceiptKind::Read, up_to_seq).await?;
+            Ok(None)
+        }
+        Cmd::ChannelsTyping { channel_id } => {
+            channels::typing(state, who, channel_id).await?;
+            Ok(None)
+        }
+        Cmd::ChannelsReact {
+            channel_id,
+            message_id,
+            emoji,
+        } => {
+            channels::react(state, who, channel_id, message_id, &emoji, true).await?;
+            Ok(None)
+        }
+        Cmd::ChannelsUnreact {
+            channel_id,
+            message_id,
+            emoji,
+        } => {
+            channels::react(state, who, channel_id, message_id, &emoji, false).await?;
+            Ok(None)
+        }
+        Cmd::ChannelsPin {
+            channel_id,
+            message_id,
+        } => {
+            channels::pin(state, who, channel_id, message_id, true).await?;
+            Ok(None)
+        }
+        Cmd::ChannelsUnpin {
+            channel_id,
+            message_id,
+        } => {
+            channels::pin(state, who, channel_id, message_id, false).await?;
+            Ok(None)
+        }
+        Cmd::ChannelsMemberAdd {
+            channel_id,
+            character_id,
+        } => {
+            channels::member_change(state, who, channel_id, character_id, true).await?;
+            Ok(None)
+        }
+        Cmd::ChannelsMemberRemove {
+            channel_id,
+            character_id,
+        } => {
+            channels::member_change(state, who, channel_id, character_id, false).await?;
+            Ok(None)
+        }
 
         Cmd::NotifySeen { ids } => {
             notify::seen(&state.pg, who, &ids).await?;
@@ -229,6 +293,15 @@ fn wire_name(cmd: &Cmd) -> &'static str {
         Cmd::ChannelsOpenDirect { .. } => "channels.open_direct",
         Cmd::ChannelsCreate { .. } => "channels.create",
         Cmd::ChannelsList => "channels.list",
+        Cmd::ChannelsMarkDelivered { .. } => "channels.mark_delivered",
+        Cmd::ChannelsMarkRead { .. } => "channels.mark_read",
+        Cmd::ChannelsTyping { .. } => "channels.typing",
+        Cmd::ChannelsReact { .. } => "channels.react",
+        Cmd::ChannelsUnreact { .. } => "channels.unreact",
+        Cmd::ChannelsPin { .. } => "channels.pin",
+        Cmd::ChannelsUnpin { .. } => "channels.unpin",
+        Cmd::ChannelsMemberAdd { .. } => "channels.member_add",
+        Cmd::ChannelsMemberRemove { .. } => "channels.member_remove",
         Cmd::NotifySeen { .. } => "notify.seen",
         Cmd::NotifyClear => "notify.clear",
     }
