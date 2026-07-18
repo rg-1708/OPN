@@ -6,6 +6,58 @@ to OPN-CORE.md as CDRs — this file records *how the build actually went*.
 
 ---
 
+## 2026-07-18 (night, later) — CI armed by the first push, and caught a migration role-race on run one
+
+The first push finally happened (burning down Sprint 0's CI/drift-gate criterion,
+open since the beginning). CI's `test` job went red immediately — not on any new
+code, but on a **pre-existing flaky race** in migration `0001` that had never
+surfaced across five sessions of local runs, because the local cluster already
+had the `opn_app` role from a prior boot and the race only fires when it is
+absent.
+
+### The bug
+
+`0001` creates the runtime `opn_app` role, guarded (Sprint 0 decision 3) with
+`IF NOT EXISTS (…pg_roles…) THEN CREATE ROLE … EXCEPTION WHEN duplicate_object`.
+`#[sqlx::test]` makes a fresh database per test and re-runs every migration; roles
+are **cluster-wide**, so on a fresh cluster N tests concurrently pass the
+`NOT EXISTS` check and all issue `CREATE ROLE opn_app`. The guard anticipated the
+race but caught the wrong error: a *serialized* loser gets `duplicate_object`
+(42710), but two *truly concurrent* creates collide at the `pg_authid` unique
+index and raise `unique_violation` (**23505**) — which the handler did not catch.
+`create_cap_rejected` drew the short straw and failed in migration setup.
+
+### The fix
+
+`EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL` — swallow both
+forms of "someone else created it". One line, at the single guard every test's
+migration run routes through.
+
+### Verified (the reproduction is the point)
+
+`docker compose down -v` to wipe the volume → fresh cluster with **`opn_app`
+absent** (confirmed `SELECT count(*) … = 0`), which is exactly the CI condition
+local runs never reproduced. Then `cargo test --workspace`: **all green, zero
+failures**, `channels.rs` back to `8 passed`. The wipe re-arms the race; the fix
+holds through it.
+
+### Reflection
+
+- **The push paid for itself on the first run.** The whole "why push" question
+  from earlier this session got its empirical answer: CI is a *different
+  environment* (fresh cluster, real concurrency) and it caught a latent race a
+  warm local cluster structurally cannot. This is "real-runtime-catches-desk-
+  checks" one more layer out — past Postgres semantics, the async scheduler, and
+  the gateway cap, now the **cluster-global role namespace under test
+  concurrency**.
+- **The lesson for local verification:** a green local `cargo test` on a
+  long-lived dev cluster is not the same test CI runs. Anything touching
+  cluster-wide objects (roles, tablespaces) needs a `down -v` wipe to exercise
+  the cold-start path. Worth doing before the *next* migration that creates a
+  cluster-global object.
+
+---
+
 ## 2026-07-18 (night) — Sprint 4 **part B** (`opn-loadgen` v0 + nightly perf-smoke machinery): built, verified live; three-night criterion still OPEN
 
 Closes the loadgen half deferred from part A. The load generator exists, runs

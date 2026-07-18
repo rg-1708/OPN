@@ -47,9 +47,13 @@ BEGIN
             NOCREATEDB
             NOCREATEROLE;
     END IF;
-EXCEPTION WHEN duplicate_object THEN
+EXCEPTION WHEN duplicate_object OR unique_violation THEN
     -- Parallel per-test databases can race the existence check; the loser's
-    -- CREATE ROLE failing is fine — the role exists.
+    -- CREATE ROLE failing is fine — the role exists. Two forms of the race:
+    -- a serialized loser gets duplicate_object (42710); two truly-concurrent
+    -- CREATE ROLEs that both pass the NOT EXISTS check collide at the
+    -- cluster-wide pg_authid unique index instead, raising unique_violation
+    -- (23505). Both mean "someone else created it" — swallow either.
     NULL;
 END
 $$;
