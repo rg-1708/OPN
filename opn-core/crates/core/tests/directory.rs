@@ -365,3 +365,54 @@ async fn listings_create_list_delete_expire(admin: PgPool) {
         .expect("janitor");
     assert_eq!(deleted, 1, "janitor deletes exactly the expired row");
 }
+
+/// Cross-world RLS canary for every Sprint 5 table (roadmap Sprint 1 exit
+/// pattern, lapsed since media part A; Sprint 9 generates the exhaustive
+/// version). Load-bearing for `blocks` especially: resolve's two subqueries
+/// carry no `world_id` predicate — RLS is the *only* thing scoping them. The
+/// probe is a raw unfiltered `SELECT count(*)` under the other world's tx, so a
+/// zero can only come from the policy, and the same count under the owning
+/// world proves the rows exist (no vacuous pass).
+#[sqlx::test(migrator = "opn_core::MIGRATOR")]
+async fn cross_world_rls_isolation(admin: PgPool) {
+    let (state, alice, _num) = state_and_alice(&admin).await;
+    // A second, unrelated world in the same database.
+    let (world_b, _tenant_b, _key_b) = seed_world_tenant(&admin).await;
+
+    // One row per table, all owned by world-A's alice.
+    directory::contact_upsert(&state, &alice, "555-0001", "Bob", None, None)
+        .await
+        .expect("contact");
+    directory::block(&state, &alice, "555-9999")
+        .await
+        .expect("block");
+    directory::listing_create(&state, &alice, "yp", "sale", "Item", None, "555-1", None)
+        .await
+        .expect("listing");
+    seed_live_media(&state, &alice).await;
+
+    // Literal statements — sqlx wants 'static SQL (see channels/store.rs note).
+    let probes: [(&str, &str); 4] = [
+        ("contacts", "SELECT count(*) FROM contacts"),
+        ("blocks", "SELECT count(*) FROM blocks"),
+        ("listings", "SELECT count(*) FROM listings"),
+        ("media", "SELECT count(*) FROM media"),
+    ];
+    for (table, count_sql) in probes {
+        let mut tx_a = world_tx(&state.pg, alice.world_id).await.expect("tx a");
+        let in_a: i64 = sqlx::query_scalar(count_sql)
+            .fetch_one(&mut *tx_a)
+            .await
+            .expect("count in world a");
+        tx_a.commit().await.expect("commit");
+        assert_eq!(in_a, 1, "{table}: owning world sees its row");
+
+        let mut tx_b = world_tx(&state.pg, world_b).await.expect("tx b");
+        let in_b: i64 = sqlx::query_scalar(count_sql)
+            .fetch_one(&mut *tx_b)
+            .await
+            .expect("count in world b");
+        tx_b.commit().await.expect("commit");
+        assert_eq!(in_b, 0, "{table}: cross-world read must be empty (RLS)");
+    }
+}

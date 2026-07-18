@@ -129,6 +129,40 @@ budgeted verification that does (ADR-1: verification is work, not polish).
   still the single highest-leverage undone thing — it now arms the drift gate with
   three more binding files and unblocks Sprint 4's three-night perf smoke.
 
+### Post-review addendum (same night)
+
+A second review pass over part B's deviations ruled all five justified and
+found two coverage conventions that had silently lapsed; both closed now:
+
+1. **Cross-world RLS canary restored** (`directory::cross_world_rls_isolation`):
+   raw unfiltered `SELECT count(*)` per table under the *other* world's tx →
+   zero, and under the owning world → one (no vacuous pass). Covers `contacts`,
+   `blocks`, `listings` **and `media`** — part A had dropped the Sprint-1
+   per-table canary convention and part B initially continued the lapse. This
+   matters most for `blocks`: resolve's subqueries carry no `world_id`
+   predicate, so RLS is the only thing scoping them — precisely the "RLS
+   forgotten on a new table" risk-table row.
+2. **Golden wire-shape tests back-filled** (`contracts/tests/wire.rs`, 13 → 20
+   tests): the Sprint-0 convention ("each Cmd variant, golden JSON strings")
+   had stopped at Sprint 2 — channels, notify, media all landed without
+   goldens. All 26 missing commands now pinned. The bindings drift gate covers
+   naming, not payload shape; the goldens are what would catch a serde attr
+   regression before a client does.
+3. **OPN-CORE.md §10.7 amended** (design-doc-first rule, retroactively):
+   `owner_character` added to the listings tuple with a dated note, and the
+   block-scope consequence made explicit — a block gates *new* reach only; an
+   already-open thread keeps flowing, deliberately, because killing the thread
+   the moment the block lands would reveal the block (same privacy rule as
+   resolve). The doc now says "do not fix this by gating `channels.send`" so
+   nobody helpfully breaks it later.
+
+Lesson: conventions enforced by discipline (per-sprint canary, per-command
+golden) drift exactly the way the roadmap's compiler-enforced ones don't —
+both lapses started the first sprint after their pattern was established and
+went unnoticed for two more. Sprint 9's generated RLS tests will make the
+canary compiler-shaped; the goldens have no such generator, so they stay a
+review-checklist item.
+
 ### Next session
 
 1. **The first push** — unchanged, still the critical path (drift gate +

@@ -573,7 +573,9 @@ contacts  (owner_character, world_id, number, display_name, avatar_media?, meta 
           -- PK (owner_character, number): contacts point at numbers, resolved
           -- to a character only at action time via directory.resolve
 blocks    (world_id, blocker_character, blocked_number)
-listings  (id, world_id, app_id, kind, title, body jsonb, contact_number, created_at, expires_at)
+listings  (id, world_id, owner_character, app_id, kind, title, body jsonb, contact_number, created_at, expires_at)
+          -- owner_character added 2026-07 (build): delete authz needs an owner
+          -- (delete-not-yours → not_found, no existence leak)
 ```
 
 Commands: `directory.contacts.*` (CRUD), `directory.block/unblock`,
@@ -582,7 +584,12 @@ behind a number), `directory.listings.*` (YellowPages/ads).
 
 Blocks are enforced where actions happen: `channels.open_direct` and
 `calls.start` consult `blocks` — directory owns the data, not the
-enforcement points.
+enforcement points. Deliberate consequence: a block gates *new* reach only —
+an already-open thread keeps flowing in both directions. Blocking mid-
+conversation without leaking "you were blocked" is impossible if the thread
+goes dead the moment the block lands; leaving it live keeps the block
+undetectable (same privacy rule as resolve). Do not "fix" this by gating
+`channels.send`.
 
 ### 10.8 notify
 

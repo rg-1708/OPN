@@ -2,9 +2,16 @@
 //! shapes are literal strings here, not re-derived. Compared as
 //! `serde_json::Value` so key order is irrelevant but content is exact.
 
+use contracts::types::{MediaKind, MessageBody};
 use contracts::{cmd::SettingsScope, ClientFrame, Cmd, ErrBody, ErrCode, Evt, ServerMsg};
 use serde_json::{json, Value};
 use uuid::Uuid;
+
+/// Fixed test uuid `0198c5b6-0000-7000-8000-0000000000<xx>` — goldens embed the
+/// full literal; this keeps the Rust side readable.
+fn u(xx: &str) -> Uuid {
+    Uuid::parse_str(&format!("0198c5b6-0000-7000-8000-0000000000{xx}")).expect("valid uuid")
+}
 
 fn roundtrip(frame: &ClientFrame, golden: &str) {
     let ser = serde_json::to_value(frame).expect("serialize");
@@ -144,6 +151,301 @@ fn client_frame_identity_set_share_presence() {
             cmd: Cmd::IdentitySetSharePresence { on: true },
         },
         r#"{"id":9,"cmd":"identity.set_share_presence","payload":{"on":true}}"#,
+    );
+}
+
+// ── channels (goldens added 2026-07-18; commands landed Sprints 3–4) ─────────
+
+#[test]
+fn client_frame_channels_send() {
+    roundtrip(
+        &ClientFrame {
+            id: 10,
+            cmd: Cmd::ChannelsSend {
+                channel_id: u("11"),
+                client_uuid: u("12"),
+                body: MessageBody {
+                    text: Some("hi".into()),
+                    media_ids: None,
+                    gif_url: None,
+                    meta: None,
+                },
+            },
+        },
+        r#"{"id":10,"cmd":"channels.send","payload":{"channel_id":"0198c5b6-0000-7000-8000-000000000011","client_uuid":"0198c5b6-0000-7000-8000-000000000012","body":{"text":"hi","media_ids":null,"gif_url":null,"meta":null}}}"#,
+    );
+}
+
+#[test]
+fn client_frame_channels_thread_commands() {
+    roundtrip(
+        &ClientFrame {
+            id: 11,
+            cmd: Cmd::ChannelsOpenDirect {
+                number: "555-1234".into(),
+            },
+        },
+        r#"{"id":11,"cmd":"channels.open_direct","payload":{"number":"555-1234"}}"#,
+    );
+    roundtrip(
+        &ClientFrame {
+            id: 12,
+            cmd: Cmd::ChannelsCreate {
+                name: Some("crew".into()),
+                members: vec![u("13")],
+            },
+        },
+        r#"{"id":12,"cmd":"channels.create","payload":{"name":"crew","members":["0198c5b6-0000-7000-8000-000000000013"]}}"#,
+    );
+    roundtrip(
+        &ClientFrame {
+            id: 13,
+            cmd: Cmd::ChannelsList,
+        },
+        r#"{"id":13,"cmd":"channels.list"}"#,
+    );
+    roundtrip(
+        &ClientFrame {
+            id: 14,
+            cmd: Cmd::ChannelsMemberAdd {
+                channel_id: u("11"),
+                character_id: u("13"),
+            },
+        },
+        r#"{"id":14,"cmd":"channels.member_add","payload":{"channel_id":"0198c5b6-0000-7000-8000-000000000011","character_id":"0198c5b6-0000-7000-8000-000000000013"}}"#,
+    );
+    roundtrip(
+        &ClientFrame {
+            id: 15,
+            cmd: Cmd::ChannelsMemberRemove {
+                channel_id: u("11"),
+                character_id: u("13"),
+            },
+        },
+        r#"{"id":15,"cmd":"channels.member_remove","payload":{"channel_id":"0198c5b6-0000-7000-8000-000000000011","character_id":"0198c5b6-0000-7000-8000-000000000013"}}"#,
+    );
+}
+
+#[test]
+fn client_frame_channels_message_state_commands() {
+    roundtrip(
+        &ClientFrame {
+            id: 16,
+            cmd: Cmd::ChannelsMarkDelivered {
+                channel_id: u("11"),
+                up_to_seq: 41,
+            },
+        },
+        r#"{"id":16,"cmd":"channels.mark_delivered","payload":{"channel_id":"0198c5b6-0000-7000-8000-000000000011","up_to_seq":41}}"#,
+    );
+    roundtrip(
+        &ClientFrame {
+            id: 17,
+            cmd: Cmd::ChannelsMarkRead {
+                channel_id: u("11"),
+                up_to_seq: 41,
+            },
+        },
+        r#"{"id":17,"cmd":"channels.mark_read","payload":{"channel_id":"0198c5b6-0000-7000-8000-000000000011","up_to_seq":41}}"#,
+    );
+    roundtrip(
+        &ClientFrame {
+            id: 18,
+            cmd: Cmd::ChannelsTyping {
+                channel_id: u("11"),
+            },
+        },
+        r#"{"id":18,"cmd":"channels.typing","payload":{"channel_id":"0198c5b6-0000-7000-8000-000000000011"}}"#,
+    );
+    roundtrip(
+        &ClientFrame {
+            id: 19,
+            cmd: Cmd::ChannelsReact {
+                channel_id: u("11"),
+                message_id: u("14"),
+                emoji: "👍".into(),
+            },
+        },
+        r#"{"id":19,"cmd":"channels.react","payload":{"channel_id":"0198c5b6-0000-7000-8000-000000000011","message_id":"0198c5b6-0000-7000-8000-000000000014","emoji":"👍"}}"#,
+    );
+    roundtrip(
+        &ClientFrame {
+            id: 20,
+            cmd: Cmd::ChannelsUnreact {
+                channel_id: u("11"),
+                message_id: u("14"),
+                emoji: "👍".into(),
+            },
+        },
+        r#"{"id":20,"cmd":"channels.unreact","payload":{"channel_id":"0198c5b6-0000-7000-8000-000000000011","message_id":"0198c5b6-0000-7000-8000-000000000014","emoji":"👍"}}"#,
+    );
+    roundtrip(
+        &ClientFrame {
+            id: 21,
+            cmd: Cmd::ChannelsPin {
+                channel_id: u("11"),
+                message_id: u("14"),
+            },
+        },
+        r#"{"id":21,"cmd":"channels.pin","payload":{"channel_id":"0198c5b6-0000-7000-8000-000000000011","message_id":"0198c5b6-0000-7000-8000-000000000014"}}"#,
+    );
+    roundtrip(
+        &ClientFrame {
+            id: 22,
+            cmd: Cmd::ChannelsUnpin {
+                channel_id: u("11"),
+                message_id: u("14"),
+            },
+        },
+        r#"{"id":22,"cmd":"channels.unpin","payload":{"channel_id":"0198c5b6-0000-7000-8000-000000000011","message_id":"0198c5b6-0000-7000-8000-000000000014"}}"#,
+    );
+}
+
+// ── media (Sprint 5 part A) ──────────────────────────────────────────────────
+
+#[test]
+fn client_frame_media_commands() {
+    roundtrip(
+        &ClientFrame {
+            id: 23,
+            cmd: Cmd::MediaRequestUpload {
+                kind: MediaKind::Photo,
+                bytes: 1024,
+                mime: "image/jpeg".into(),
+            },
+        },
+        r#"{"id":23,"cmd":"media.request_upload","payload":{"kind":"photo","bytes":1024,"mime":"image/jpeg"}}"#,
+    );
+    roundtrip(
+        &ClientFrame {
+            id: 24,
+            cmd: Cmd::MediaCommit { media_id: u("15") },
+        },
+        r#"{"id":24,"cmd":"media.commit","payload":{"media_id":"0198c5b6-0000-7000-8000-000000000015"}}"#,
+    );
+}
+
+// ── directory (Sprint 5 part B) ──────────────────────────────────────────────
+
+#[test]
+fn client_frame_directory_contact_and_block_commands() {
+    roundtrip(
+        &ClientFrame {
+            id: 25,
+            cmd: Cmd::DirectoryContactUpsert {
+                number: "555-1234".into(),
+                display_name: "Bob".into(),
+                avatar_media: None,
+                meta: None,
+            },
+        },
+        r#"{"id":25,"cmd":"directory.contact_upsert","payload":{"number":"555-1234","display_name":"Bob","avatar_media":null,"meta":null}}"#,
+    );
+    roundtrip(
+        &ClientFrame {
+            id: 26,
+            cmd: Cmd::DirectoryContactDelete {
+                number: "555-1234".into(),
+            },
+        },
+        r#"{"id":26,"cmd":"directory.contact_delete","payload":{"number":"555-1234"}}"#,
+    );
+    roundtrip(
+        &ClientFrame {
+            id: 27,
+            cmd: Cmd::DirectoryContacts,
+        },
+        r#"{"id":27,"cmd":"directory.contacts"}"#,
+    );
+    roundtrip(
+        &ClientFrame {
+            id: 28,
+            cmd: Cmd::DirectoryBlock {
+                number: "555-9999".into(),
+            },
+        },
+        r#"{"id":28,"cmd":"directory.block","payload":{"number":"555-9999"}}"#,
+    );
+    roundtrip(
+        &ClientFrame {
+            id: 29,
+            cmd: Cmd::DirectoryUnblock {
+                number: "555-9999".into(),
+            },
+        },
+        r#"{"id":29,"cmd":"directory.unblock","payload":{"number":"555-9999"}}"#,
+    );
+    roundtrip(
+        &ClientFrame {
+            id: 30,
+            cmd: Cmd::DirectoryBlocks,
+        },
+        r#"{"id":30,"cmd":"directory.blocks"}"#,
+    );
+    roundtrip(
+        &ClientFrame {
+            id: 31,
+            cmd: Cmd::DirectoryResolve {
+                number: "555-1234".into(),
+            },
+        },
+        r#"{"id":31,"cmd":"directory.resolve","payload":{"number":"555-1234"}}"#,
+    );
+}
+
+#[test]
+fn client_frame_directory_listing_commands() {
+    roundtrip(
+        &ClientFrame {
+            id: 32,
+            cmd: Cmd::DirectoryListingCreate {
+                app_id: "yp".into(),
+                kind: "sale".into(),
+                title: "Bike".into(),
+                body: None,
+                contact_number: "555-1234".into(),
+                ttl_secs: Some(3600),
+            },
+        },
+        r#"{"id":32,"cmd":"directory.listing_create","payload":{"app_id":"yp","kind":"sale","title":"Bike","body":null,"contact_number":"555-1234","ttl_secs":3600}}"#,
+    );
+    roundtrip(
+        &ClientFrame {
+            id: 33,
+            cmd: Cmd::DirectoryListingDelete { id: u("16") },
+        },
+        r#"{"id":33,"cmd":"directory.listing_delete","payload":{"id":"0198c5b6-0000-7000-8000-000000000016"}}"#,
+    );
+    roundtrip(
+        &ClientFrame {
+            id: 34,
+            cmd: Cmd::DirectoryListings {
+                app_id: "yp".into(),
+                cursor: None,
+                limit: Some(25),
+            },
+        },
+        r#"{"id":34,"cmd":"directory.listings","payload":{"app_id":"yp","cursor":null,"limit":25}}"#,
+    );
+}
+
+// ── notify (Sprint 3) ────────────────────────────────────────────────────────
+
+#[test]
+fn client_frame_notify_commands() {
+    roundtrip(
+        &ClientFrame {
+            id: 35,
+            cmd: Cmd::NotifySeen { ids: vec![u("17")] },
+        },
+        r#"{"id":35,"cmd":"notify.seen","payload":{"ids":["0198c5b6-0000-7000-8000-000000000017"]}}"#,
+    );
+    roundtrip(
+        &ClientFrame {
+            id: 36,
+            cmd: Cmd::NotifyClear,
+        },
+        r#"{"id":36,"cmd":"notify.clear"}"#,
     );
 }
 
