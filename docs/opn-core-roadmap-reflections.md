@@ -6,6 +6,183 @@ to OPN-CORE.md as CDRs — this file records *how the build actually went*.
 
 ---
 
+## 2026-07-18 (later) — Sprint 6 **part A** (calls: schema, FSM-as-data, start/accept/decline/hangup/signal, snapshot-on-sub, ring-via-notify, zombie reap): built, verified live; tenant link (part B) deferred
+
+Same seam-split as every sprint since 4: Sprint 6 has two shared-nothing halves —
+**(A)** the WS-facing call primitive (session FSM, the WebRTC signaling relay,
+ring delivery, janitor reap) and **(B)** the tenant `/link` gateway (voice-target
+`set_targets`/`clear` events, `/calls/active` re-sync, coturn + `ice_servers`).
+A touches only `call_sessions`/`call_participants` + the gateway; B is a separate
+connection type and registry. So A shipped as a complete, reviewed, green slice
+and stopped here. No roadmap amendment (items 6/7 stay in Sprint 6).
+
+### What exists now
+
+- **Migration `0009_calls.sql`** — `call_sessions` (kind, state, ended_at) +
+  `call_participants` (state, device_id, joined_at/left_at, PK `(call_id,
+  character_id)`). Two partial indexes: `call_participants_active`
+  `WHERE state IN ('ringing','joined')` (the busy check) and
+  `call_sessions_active_age` `WHERE state <> 'ended'`. Standard 0001 NULLIF
+  FORCE-RLS on both, grants to `opn_app`.
+- **`primitives/calls/fsm.rs`** — the state machine as **one pure function**
+  `apply(session, actor, others, action) -> Result<Transition, ()>` over the
+  contracts enums (no duplicate enum, no conversion at the store boundary).
+  Accept→Joined/Active, Decline→Declined (+ end iff no other Ringing|Joined),
+  Hangup→Left (+ end iff no other Joined = last-hangup), `Ended` absorbs
+  everything. The Sprint 9 proptest target; 6 unit tests cover the table + terminal
+  absorption.
+- **`primitives/calls/store.rs`** — `start` (resolve via the directory seam →
+  block/unknown → `NotFound`; busy callee → `Conflict`; caller `joined` + callee
+  `ringing` in one tx), `transition` (session `FOR UPDATE` then participants
+  id-ordered `FOR UPDATE` → deadlock-free; run the pure FSM; persist; return the
+  fresh snapshot), `authorize_sub` + `snapshot` (split for subscribe-first),
+  `authorize_signal`, `reap_zombie_rings`.
+- **`primitives/calls/mod.rs`** — handlers + fan-out: `start` rings the callee via
+  `notify::route(class=ring, app_id="dialer")` (best-effort; the reap backstops an
+  unanswered ring), accept/decline/hangup publish the full `calls.state` snapshot
+  on `call:<id>`, `signal` authorizes both parties then relays `calls.signal`
+  verbatim (never stored/inspected, 16 KB cap checked before any DB work).
+- **Contracts** — 5 `Cmd` (`calls.start/accept/decline/hangup/signal`), 2 `Evt`
+  (`calls.state` full snapshot, `calls.signal` relay — both **Durable**), 4 types
+  (`CallKind`, `CallSessionState`, `CallParticipantState`, `CallParticipant`).
+  Bindings regenerated (drift gate armed with 4 new `.ts` + updated Cmd/Evt).
+- **Wiring** — dispatch (5 command arms + the `sub call:<id>` snapshot-on-sub arm,
+  which the Sprint 2 stub returned `not_found` for), `wire_name`, rate classes
+  (all `calls.*` → `Social`), janitor `calls_reap` task, coverage match-test
+  (5 Cmd + 2 Evt), golden wire tests (5 commands + the two pushes).
+
+### Decisions closed during implementation (roadmap deviations, all ponytail)
+
+1. **`ice_servers`/coturn deferred to part B, no wire change in A.** The design
+   puts `ice_servers` in the `calls.state` snapshot, sourced from coturn config —
+   which is the part-B "everything video needs from the backend" bucket. Part A's
+   snapshot ships without it; a client can drive the FSM/signaling relay in tests
+   without a TURN server, and adding the field in B is additive (no golden churn
+   for A).
+2. **Signaling relay = publish-on-`call:<id>` with `from`/`to`, clients filter.**
+   Reuses `gateway::publish` (so it crosses replicas for free), 1:1-safe (a call
+   has exactly two participants, so `from`/`to` fully partition the topic).
+   Directed per-recipient routing is the upgrade **if** group calls ever exist —
+   marked at the fan-out site.
+3. **FSM uses the contracts enums directly**, not a private core copy — the store
+   maps DB text ↔ enum, the handler maps enum → wire, and the pure function needs
+   no conversion. One source of truth for the three state sets.
+4. **`calls.*` all rate-class `Social`.** start/accept/decline/hangup are
+   occasional; `signal` carries WebRTC trickle-ICE, and Social's burst-20 covers a
+   setup trickle. Noted as a Sprint-10 budget-tuning candidate.
+5. **Ring is best-effort with no cancel-notify.** `start` rings via notify;
+   nothing pushes a *cancellation* to a callee who hasn't yet subscribed to
+   `call:<id>` — a stale-accept just gets `Conflict`. Inherent to the "dialer
+   needs no standing sub" design (§10.4).
+
+### The keeper this session (the point of rule 4): a HIGH bug caught by **triple convergence**
+
+The independent test author **and both adversarial reviewers** independently
+landed on the same defect: **`reap_zombie_rings` was dead code.** My reap keyed on
+"non-ended session with **no `joined` participant**" (straight from the design's
+§10.4 wording). But `calls.start` joins the **caller** immediately, and a WS
+disconnect never reconciles call participant rows (confirmed: `ws.rs` cleanup only
+touches presence/registry) — so a crashed caller stays `joined`, every real ring
+keeps a joined participant, and the `NOT EXISTS(joined)` guard is **false for every
+ring the reap was written to catch**. Consequence is a griefing DoS: start a call,
+kill the socket, and the victim's participant row stays `ringing` forever → the
+busy check pins them **permanently un-callable**. The reap only ever fired on
+artificially-seeded rows.
+
+This is the design's own predicate being *unimplementable* given caller-joins-at-
+start. Fixes: (a) the reap now keys on `state = 'ringing' AND created_at < now() -
+60s` — a ring only leaves `ringing` via accept, so this reaps exactly the
+un-accepted ones and never an `active` call; (b) **OPN-CORE.md §10.4 amended**
+(design-doc-first) with the dated rationale so nobody re-derives the broken
+predicate from the doc. The test author's `#[ignore]`d repro (real `calls::start`
++ aged `created_at`) is now un-ignored and green; the reap's own happy-path test
+had encoded the buggy "joined-spared" semantics (a *ringing*+joined session must
+now be reaped) and was corrected to spare an **active** call instead.
+
+Lesson, fourth sprint running: the independent test leg catches a shipped defect
+every time — and here it converged with two adversarial reviewers on the *same*
+line, which is the budgeted-verification story (ADR-1) working exactly as designed.
+A desk-check reads "no joined participants → reap" as obviously correct; only
+tracing `start` → disconnect → the busy check end-to-end exposes that it can never
+fire.
+
+### Also fixed (MED, both reviewers): the snapshot-vs-live race on `sub call:`
+
+`calls.state` is a durable **full-state** event with no seq to heal a lost
+update. The original sub arm copied presence's `compute → subscribe → push`, but
+presence is ephemeral/self-healing and calls are not — a transition landing in the
+window is lost, and a lost *terminal* snapshot leaves a permanent ghost call UI.
+Switched to the **durable idiom** (the `ch:` arm's order): `authorize → subscribe
+→ read snapshot → push`, so a post-registration transition is delivered, never
+missed. The residual reorder window (a stale snapshot arriving just after a newer
+live event — a transient the next transition heals, and terminal states are
+sticky client-side) is documented at the call site with a monotonic `version` on
+`calls.state` named as the full close — deferred, since §10.4 deliberately chose
+seqless snapshots.
+
+### Documented, not fixed (LOW — acceptable for the v1 1:1 dialer)
+
+- **Group-signaling privacy**: publish-on-topic would show a third participant
+  A→B's signaling — moot at two participants; noted for any future group call.
+- **Busy-check TOCTOU**: no callee lock/constraint, so two simultaneous dials of
+  one callee both ring; blast radius is a duplicate ring that now reaps in 60 s.
+- **`authorize_signal` state split**: a non-participant can tell ended/active/
+  missing apart — moot, call ids are unguessable v7 uuids.
+- **Online-ring race**: `notify::route` live-pushes an online callee without an
+  inbox fallback (a callee racing offline drops the ring) — a shared `notify`
+  property already noted, not calls-specific.
+
+### Verification (rule 4)
+
+- `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` clean (the
+  `core` crate's `unwrap_used` deny respected — `.expect`/`assert!`/`?` only).
+- **Full workspace suite green** against the live stack (Postgres+Redis+MinIO):
+  every binary passes, 0 failures. New `tests/calls.rs` (10 tests): the WS-wire
+  full lifecycle (start → ring → snapshot-on-sub → accept → signal relay →
+  hangups → ended), start rejections (self/unknown/busy/blocked byte-identical),
+  decline's end-rule, signal authz + 16 KB cap + ended→conflict, FSM conflict
+  paths, participant-only sub, the janitor reap (+ the un-ignored crash regression),
+  cross-world RLS, and a concurrent-hangup deadlock canary. Plus 6 `fsm.rs` units
+  and 3 golden wire tests.
+- Both adversarial reviewers confirmed FSM faithfulness (cell-by-cell), SQL bind
+  correctness, deadlock-free lock ordering, RLS/migration correctness, and wiring
+  completeness — beyond the one HIGH + one MED they found.
+
+### Exit criteria status (Sprint 6 — part A slice)
+
+| Criterion | Status |
+|---|---|
+| Scripted two-client + fake-link demo (call connects, link `set_targets`, hangup clears) | **PARTIAL** — the two-client call lifecycle is `full_lifecycle_start_accept_signal_hangup` (real sockets); the fake-**link** half is part B. |
+| FSM is a pure function with 100 % transition-table coverage | **PASS (part A scope)** — pure `apply`, unit tests over the table + terminal absorption; the exhaustive generated proptest is Sprint 9. |
+| All `calls.*` in coverage test; `/link` + re-sync in route test | **PARTIAL** — all 5 `calls.*` + both events in the coverage match-test; `/link` is part B (adds no HTTP route in A). |
+
+### Reflection
+
+- **The seam-split paid a fourth time.** Calls-core and the tenant link share
+  nothing, so part A is a complete reviewed slice and B starts clean.
+- **Triple convergence on the reap bug is the verification thesis in miniature.**
+  One independent test author + two lensed reviewers, all three on the same
+  unimplementable-design-predicate — exactly the budgeted work ADR-1 buys, not
+  polish.
+- **Design-doc-first held under a real deviation.** The §10.4 predicate was wrong;
+  amended the design (dated) before trusting the code, per the standing rule.
+- **Not committed.** Sprint 6A sits untracked on top of the committed 0–5. First
+  commit + the drift-gate re-arm (4 new binding files) is the operator's call.
+
+### Next session
+
+1. **Sprint 6 part B — tenant link.** `GET /link` WS (API-key auth, last-writer
+   takeover), hello handshake, **down-only** `calls.voice { set_targets|clear }`
+   emitted from the accept/end handlers (the hook sites are marked in
+   `calls/mod.rs`), `GET /v1/tenants/self/calls/active` re-sync, coturn in compose
+   + `ice_servers` in the `calls.state` snapshot.
+2. **The deferred `calls.state` `version`** — close the snapshot-vs-live residual
+   if part B's link work touches the snapshot shape anyway.
+3. Still open, minor: online-member badging, Bearer case-sensitivity,
+   `identity.me` own-last-seen — all pre-existing, none blocking.
+
+---
+
 ## 2026-07-18 (late night) — Sprint 5 **part B** (directory: contacts, blocks, opaque resolve, block enforcement at open_direct, listings + cursor + janitor expiry): built, verified live, all Sprint 5 exit criteria now closed
 
 Part A stopped on the media/directory table seam; part B is the other half.

@@ -62,6 +62,13 @@ fn every_cmd_names_its_covering_test() {
             Cmd::DirectoryListingCreate { .. } => "directory::listings_create_list_delete_expire",
             Cmd::DirectoryListingDelete { .. } => "directory::listings_create_list_delete_expire",
             Cmd::DirectoryListings { .. } => "directory::listings_create_list_delete_expire",
+            Cmd::CallsStart { .. } => {
+                "calls::full_lifecycle_start_accept_signal_hangup, calls::start_busy_and_block"
+            }
+            Cmd::CallsAccept { .. } => "calls::full_lifecycle_start_accept_signal_hangup",
+            Cmd::CallsDecline { .. } => "calls::decline_ends_or_continues",
+            Cmd::CallsHangup { .. } => "calls::full_lifecycle_start_accept_signal_hangup",
+            Cmd::CallsSignal { .. } => "calls::signal_relay_and_authz",
             Cmd::NotifySeen { .. } => "notify::seen_marks_rows",
             Cmd::NotifyClear => "notify::clear_empties_inbox",
         }
@@ -82,6 +89,8 @@ fn every_evt_names_its_covering_test() {
             Evt::ChannelsPin { .. } => "channels_reactions_pins::pins_cap_50",
             Evt::ChannelsMember { .. } => "channels_members_resume::member_add_remove_group_only",
             Evt::ChannelsResumeOverflow { .. } => "channels_members_resume::resume_overflow_at_cap",
+            Evt::CallsState { .. } => "calls::full_lifecycle_start_accept_signal_hangup",
+            Evt::CallsSignal { .. } => "calls::signal_relay_and_authz",
         }
     }
     let _ = covering_test;

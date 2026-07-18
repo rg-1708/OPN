@@ -17,7 +17,7 @@ use super::topic::TopicKind;
 use crate::infra::auth::mint_jwt;
 use crate::infra::cursor;
 use crate::infra::ratelimit::class_of;
-use crate::primitives::{channels, directory, identity, media, notify, Fail};
+use crate::primitives::{calls, channels, directory, identity, media, notify, Fail};
 use crate::state::AppState;
 
 /// Handles one parsed frame, returns the ack. Never panics, never closes —
@@ -152,8 +152,26 @@ async fn run(
                     }
                     Ok(None)
                 }
-                // Owning primitives land in Sprints 6/8.
-                TopicKind::Call(_) | TopicKind::Feed(_) => Err(Fail::Code(ErrCode::NotFound)),
+                TopicKind::Call(call_id) => {
+                    // Participant-only (§10.4). Subscribe-first (like the `ch:`
+                    // arm, not presence): authorize → register → snapshot → push,
+                    // so a live `calls.state` transition landing after
+                    // registration is delivered, not lost — a durable full-state
+                    // event has no seq to heal a miss. Residual: a transition
+                    // committing between the snapshot read and its push can be
+                    // reordered ahead of the stale snapshot (a transient regress
+                    // the next transition heals; a `left`/`ended` terminal state
+                    // is sticky client-side). A monotonic `version` on
+                    // `calls.state` would close it fully — deferred (§10.4 chose
+                    // seqless snapshots).
+                    calls::authorize_sub(state, who, call_id).await?;
+                    state.registry.subscribe(&topic, handle);
+                    let snap = calls::snapshot(state, who, call_id).await?;
+                    state.registry.push_to(handle, &topic, &snap);
+                    Ok(None)
+                }
+                // Feed lands with its primitive in Sprint 8.
+                TopicKind::Feed(_) => Err(Fail::Code(ErrCode::NotFound)),
             }
         }
 
@@ -355,6 +373,31 @@ async fn run(
             })))
         }
 
+        Cmd::CallsStart {
+            callee_number,
+            video,
+        } => Ok(Some(calls::start(state, who, &callee_number, video).await?)),
+        Cmd::CallsAccept { call_id } => {
+            calls::accept(state, who, call_id).await?;
+            Ok(None)
+        }
+        Cmd::CallsDecline { call_id } => {
+            calls::decline(state, who, call_id).await?;
+            Ok(None)
+        }
+        Cmd::CallsHangup { call_id } => {
+            calls::hangup(state, who, call_id).await?;
+            Ok(None)
+        }
+        Cmd::CallsSignal {
+            call_id,
+            to,
+            payload,
+        } => {
+            calls::signal(state, who, call_id, to, payload).await?;
+            Ok(None)
+        }
+
         Cmd::NotifySeen { ids } => {
             notify::seen(&state.pg, who, &ids).await?;
             Ok(None)
@@ -403,6 +446,11 @@ fn wire_name(cmd: &Cmd) -> &'static str {
         Cmd::DirectoryListingCreate { .. } => "directory.listing_create",
         Cmd::DirectoryListingDelete { .. } => "directory.listing_delete",
         Cmd::DirectoryListings { .. } => "directory.listings",
+        Cmd::CallsStart { .. } => "calls.start",
+        Cmd::CallsAccept { .. } => "calls.accept",
+        Cmd::CallsDecline { .. } => "calls.decline",
+        Cmd::CallsHangup { .. } => "calls.hangup",
+        Cmd::CallsSignal { .. } => "calls.signal",
         Cmd::NotifySeen { .. } => "notify.seen",
         Cmd::NotifyClear => "notify.clear",
     }

@@ -79,6 +79,14 @@ pub fn class_of(cmd: &contracts::Cmd) -> Class {
         | Cmd::DirectoryUnblock { .. }
         | Cmd::DirectoryListingCreate { .. }
         | Cmd::DirectoryListingDelete { .. }
+        // Calls: start/accept/decline/hangup are occasional. signal carries
+        // WebRTC offer/answer/ICE — a setup trickle fits Social's burst-20;
+        // revisit if a real call storms it (Sprint 10 budget-tuning).
+        | Cmd::CallsStart { .. }
+        | Cmd::CallsAccept { .. }
+        | Cmd::CallsDecline { .. }
+        | Cmd::CallsHangup { .. }
+        | Cmd::CallsSignal { .. }
         | Cmd::NotifyClear => Class::Social,
         // Issuing a presigned upload signs policies and reserves a row — the
         // costliest command that isn't the hot path. Tight budget (§12).

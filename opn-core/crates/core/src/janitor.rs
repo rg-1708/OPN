@@ -30,6 +30,7 @@ pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
             run_task("media_pending_reap", media_reap(&state)).await;
             run_task("media_verify", media_verify(&state)).await;
             run_task("listings_expire", listings_expire(&state.pg)).await;
+            run_task("calls_reap", calls_reap(&state)).await;
             // In-process, no DB: buckets idle > 10 min go away (§12).
             run_task("ratelimit_sweep", async { Ok(state.limits.sweep_idle()) }).await;
         }
@@ -129,6 +130,27 @@ async fn media_verify(state: &AppState) -> Result<u64> {
     let mut total = 0u64;
     for world_id in world_ids {
         total += crate::primitives::media::verify_live(state, world_id).await?;
+    }
+    Ok(total)
+}
+
+/// Reaps zombie call rings across every world (§10.4): non-ended sessions older
+/// than 60 s with no joined participant are force-ended, and a final
+/// `calls.state` is published so any live subscriber converges. Per-world walk
+/// (it publishes events after the SQL), like the media sweeps. Part B extends
+/// this to also emit a tenant-link `clear` for each reaped call.
+async fn calls_reap(state: &AppState) -> Result<u64> {
+    let world_ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM worlds")
+        .fetch_all(&state.pg)
+        .await?;
+    let mut total = 0u64;
+    for world_id in world_ids {
+        let snaps = crate::primitives::calls::store::reap_zombie_rings(&state.pg, world_id).await?;
+        for snap in &snaps {
+            let evt = crate::primitives::calls::snapshot_evt(snap);
+            crate::gateway::publish(state, world_id, &format!("call:{}", snap.call_id), &evt).await;
+        }
+        total += snaps.len() as u64;
     }
     Ok(total)
 }

@@ -1,0 +1,183 @@
+//! calls primitive (OPN-CORE.md §10.4): voice/video call sessions with a
+//! crash-proof FSM (`fsm.rs`), an opaque WebRTC signaling relay, and ring
+//! delivery via `notify` (the dialer needs no standing sub). This module owns
+//! validation + post-commit fan-out; `store.rs` owns the SQL.
+//!
+//! Sprint 6 part A is the WS-facing primitive. The tenant link that carries
+//! voice-target events to the framework (`set_targets` on accept, `clear` on
+//! end) and coturn `ice_servers` in the snapshot are part B — the accept/end
+//! handlers here are where those link emits hook in.
+
+pub mod fsm;
+pub mod store;
+
+use contracts::{CallKind, ErrCode, Evt, NotifyClass};
+use serde_json::json;
+use uuid::Uuid;
+
+use super::notify::{self, Notification};
+use super::Fail;
+use crate::infra::auth::Identity;
+use crate::state::AppState;
+use fsm::Action;
+use store::CallSnapshot;
+
+/// Max phone-number length at the call seam (mirrors `channels::open_direct`).
+const NUMBER_MAX: usize = 32;
+/// Max opaque signaling payload (§10.4).
+const SIGNAL_MAX_BYTES: usize = 16 * 1024;
+
+/// Build the `calls.state` event from a snapshot — used by every emit path
+/// (handlers here and the janitor reap).
+pub fn snapshot_evt(snap: &CallSnapshot) -> Evt {
+    Evt::CallsState {
+        call_id: snap.call_id,
+        kind: snap.kind,
+        state: snap.state,
+        participants: snap.participants.clone(),
+    }
+}
+
+async fn publish_snapshot(state: &AppState, world: Uuid, snap: &CallSnapshot) {
+    crate::gateway::publish(
+        state,
+        world,
+        &format!("call:{}", snap.call_id),
+        &snapshot_evt(snap),
+    )
+    .await;
+}
+
+/// `calls.start` (§10.4): resolve → create a ringing session (caller joined,
+/// callee ringing) → ring the callee via notify → `{ call_id }`.
+pub async fn start(
+    state: &AppState,
+    who: &Identity,
+    number: &str,
+    video: bool,
+) -> Result<serde_json::Value, Fail> {
+    if number.is_empty() || number.len() > NUMBER_MAX {
+        return Err(Fail::Code(ErrCode::Invalid));
+    }
+    let kind = if video {
+        CallKind::Video
+    } else {
+        CallKind::Voice
+    };
+    let out = store::start(
+        &state.pg,
+        who.world_id,
+        who.character_id,
+        who.device_id,
+        number,
+        kind,
+    )
+    .await?;
+
+    // Ring the callee (notify picks live-push vs inbox). Best-effort: the
+    // session exists regardless, and the janitor reaps an unanswered ring after
+    // 60 s — a failed ring must not fail the caller's start.
+    let n = Notification {
+        app_id: "dialer".into(),
+        kind: "incoming_call".into(),
+        class: NotifyClass::Ring,
+        payload: json!({
+            "call_id": out.call_id,
+            "caller_number": out.caller_number,
+            "video": video,
+        }),
+    };
+    if let Err(e) = notify::route(state, who.world_id, out.callee, n, false).await {
+        tracing::error!(error = ?e, callee = %out.callee, "call ring notify failed");
+    }
+
+    Ok(json!({ "call_id": out.call_id }))
+}
+
+/// `calls.accept` (§10.4): FSM → session active, emit the fresh snapshot.
+/// (Part B also emits `set_targets` on the tenant link here.)
+pub async fn accept(state: &AppState, who: &Identity, call_id: Uuid) -> Result<(), Fail> {
+    let snap = store::transition(
+        &state.pg,
+        who.world_id,
+        call_id,
+        who.character_id,
+        Some(who.device_id),
+        Action::Accept,
+    )
+    .await?;
+    publish_snapshot(state, who.world_id, &snap).await;
+    Ok(())
+}
+
+/// `calls.decline` (§10.4): FSM → declined (+ maybe ended), emit snapshot.
+pub async fn decline(state: &AppState, who: &Identity, call_id: Uuid) -> Result<(), Fail> {
+    transition_and_emit(state, who, call_id, Action::Decline).await
+}
+
+/// `calls.hangup` (§10.4): FSM → left (+ maybe ended), emit snapshot.
+pub async fn hangup(state: &AppState, who: &Identity, call_id: Uuid) -> Result<(), Fail> {
+    transition_and_emit(state, who, call_id, Action::Hangup).await
+}
+
+/// Shared body for decline/hangup: run the transition (device stays whatever it
+/// was — only accept records a joining device) and emit the snapshot.
+async fn transition_and_emit(
+    state: &AppState,
+    who: &Identity,
+    call_id: Uuid,
+    action: Action,
+) -> Result<(), Fail> {
+    let snap = store::transition(
+        &state.pg,
+        who.world_id,
+        call_id,
+        who.character_id,
+        None,
+        action,
+    )
+    .await?;
+    publish_snapshot(state, who.world_id, &snap).await;
+    Ok(())
+}
+
+/// `calls.signal` (§10.4): opaque relay. Authorize both parties as active
+/// participants, then forward verbatim on `call:<id>` (durable). Never stored,
+/// never inspected. Clients filter by `to`.
+pub async fn signal(
+    state: &AppState,
+    who: &Identity,
+    call_id: Uuid,
+    to: Uuid,
+    payload: serde_json::Value,
+) -> Result<(), Fail> {
+    if serde_json::to_vec(&payload)
+        .map(|v| v.len())
+        .unwrap_or(usize::MAX)
+        > SIGNAL_MAX_BYTES
+    {
+        return Err(Fail::Code(ErrCode::TooLarge));
+    }
+    store::authorize_signal(&state.pg, who.world_id, call_id, who.character_id, to).await?;
+    let evt = Evt::CallsSignal {
+        call_id,
+        from: who.character_id,
+        to,
+        payload,
+    };
+    crate::gateway::publish(state, who.world_id, &format!("call:{call_id}"), &evt).await;
+    Ok(())
+}
+
+/// `sub call:<id>` authorization (§4.4, §10.4): participant-only. Called before
+/// the dispatch arm registers the subscription.
+pub async fn authorize_sub(state: &AppState, who: &Identity, call_id: Uuid) -> Result<(), Fail> {
+    store::authorize_sub(&state.pg, who.world_id, call_id, who.character_id).await
+}
+
+/// The `calls.state` snapshot the dispatch arm pushes before the sub ack, read
+/// *after* registration so a concurrent transition isn't lost.
+pub async fn snapshot(state: &AppState, who: &Identity, call_id: Uuid) -> Result<Evt, Fail> {
+    let snap = store::snapshot(&state.pg, who.world_id, call_id).await?;
+    Ok(snapshot_evt(&snap))
+}

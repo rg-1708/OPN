@@ -429,6 +429,119 @@ fn client_frame_directory_listing_commands() {
     );
 }
 
+// ── calls (Sprint 6 part A) ──────────────────────────────────────────────────
+
+#[test]
+fn client_frame_calls_commands() {
+    roundtrip(
+        &ClientFrame {
+            id: 40,
+            cmd: Cmd::CallsStart {
+                callee_number: "555-1234".into(),
+                video: true,
+            },
+        },
+        r#"{"id":40,"cmd":"calls.start","payload":{"callee_number":"555-1234","video":true}}"#,
+    );
+    roundtrip(
+        &ClientFrame {
+            id: 41,
+            cmd: Cmd::CallsAccept { call_id: u("40") },
+        },
+        r#"{"id":41,"cmd":"calls.accept","payload":{"call_id":"0198c5b6-0000-7000-8000-000000000040"}}"#,
+    );
+    roundtrip(
+        &ClientFrame {
+            id: 42,
+            cmd: Cmd::CallsDecline { call_id: u("40") },
+        },
+        r#"{"id":42,"cmd":"calls.decline","payload":{"call_id":"0198c5b6-0000-7000-8000-000000000040"}}"#,
+    );
+    roundtrip(
+        &ClientFrame {
+            id: 43,
+            cmd: Cmd::CallsHangup { call_id: u("40") },
+        },
+        r#"{"id":43,"cmd":"calls.hangup","payload":{"call_id":"0198c5b6-0000-7000-8000-000000000040"}}"#,
+    );
+    roundtrip(
+        &ClientFrame {
+            id: 44,
+            cmd: Cmd::CallsSignal {
+                call_id: u("40"),
+                to: u("42"),
+                payload: json!({"sdp": "v=0"}),
+            },
+        },
+        r#"{"id":44,"cmd":"calls.signal","payload":{"call_id":"0198c5b6-0000-7000-8000-000000000040","to":"0198c5b6-0000-7000-8000-000000000042","payload":{"sdp":"v=0"}}}"#,
+    );
+}
+
+#[test]
+fn push_calls_state() {
+    use contracts::types::{CallKind, CallParticipant, CallParticipantState, CallSessionState};
+    let push = ServerMsg::Push {
+        topic: "call:0198c5b6-0000-7000-8000-000000000040".into(),
+        evt: Evt::CallsState {
+            call_id: u("40"),
+            kind: CallKind::Video,
+            state: CallSessionState::Ringing,
+            participants: vec![
+                CallParticipant {
+                    character_id: u("42"),
+                    state: CallParticipantState::Joined,
+                },
+                CallParticipant {
+                    character_id: u("43"),
+                    state: CallParticipantState::Ringing,
+                },
+            ],
+        },
+    };
+    assert_eq!(
+        serde_json::to_value(&push).expect("serialize"),
+        json!({
+            "topic": "call:0198c5b6-0000-7000-8000-000000000040",
+            "evt": "calls.state",
+            "payload": {
+                "call_id": "0198c5b6-0000-7000-8000-000000000040",
+                "kind": "video",
+                "state": "ringing",
+                "participants": [
+                    {"character_id": "0198c5b6-0000-7000-8000-000000000042", "state": "joined"},
+                    {"character_id": "0198c5b6-0000-7000-8000-000000000043", "state": "ringing"}
+                ]
+            }
+        })
+    );
+}
+
+#[test]
+fn push_calls_signal() {
+    let push = ServerMsg::Push {
+        topic: "call:0198c5b6-0000-7000-8000-000000000040".into(),
+        evt: Evt::CallsSignal {
+            call_id: u("40"),
+            from: u("42"),
+            to: u("43"),
+            payload: json!({"candidate": "a=x"}),
+        },
+    };
+    assert_eq!(
+        serde_json::to_value(&push).expect("serialize"),
+        json!({
+            "topic": "call:0198c5b6-0000-7000-8000-000000000040",
+            "evt": "calls.signal",
+            "payload": {
+                "call_id": "0198c5b6-0000-7000-8000-000000000040",
+                "from": "0198c5b6-0000-7000-8000-000000000042",
+                "to": "0198c5b6-0000-7000-8000-000000000043",
+                "payload": {"candidate": "a=x"}
+            }
+        })
+    );
+}
+
 // ── notify (Sprint 3) ────────────────────────────────────────────────────────
 
 #[test]

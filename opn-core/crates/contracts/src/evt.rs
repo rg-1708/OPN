@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use uuid::Uuid;
 
-use crate::types::{NotifyClass, ReceiptKind};
+use crate::types::{CallKind, CallParticipant, CallSessionState, NotifyClass, ReceiptKind};
 
 /// Every server→client pushed event. Same tagging idiom as `Cmd`.
 ///
@@ -105,6 +105,31 @@ pub enum Evt {
     /// than one replay, so it should cold-load history over HTTP. Durable.
     #[serde(rename = "channels.resume_overflow")]
     ChannelsResumeOverflow { channel_id: Uuid },
+
+    /// Full call-session snapshot on `call:<id>` (§10.4): pushed on every state
+    /// change and once on subscribe (snapshot-on-sub, CDR-6). Full-state by
+    /// design — small, and it kills the delta-desync class of bug. Durable: a
+    /// dropped snapshot leaves the client's call UI wrong until re-sync.
+    #[serde(rename = "calls.state")]
+    CallsState {
+        call_id: Uuid,
+        kind: CallKind,
+        state: CallSessionState,
+        participants: Vec<CallParticipant>,
+    },
+
+    /// Opaque WebRTC signaling relay on `call:<id>` (§10.4): offer/answer/ICE
+    /// forwarded between participants, never inspected. Durable — a dropped ICE
+    /// candidate stalls call setup, so the queue-full close is the correct
+    /// failure (a consumer too slow for signaling was not completing the call).
+    #[serde(rename = "calls.signal")]
+    CallsSignal {
+        call_id: Uuid,
+        from: Uuid,
+        to: Uuid,
+        #[ts(type = "unknown")]
+        payload: serde_json::Value,
+    },
 }
 
 /// Backpressure class (OPN-CORE.md §4.3): durable events close a slow
@@ -144,6 +169,12 @@ impl Evt {
             // The "cold-load, you overflowed" signal must arrive or the client
             // silently keeps a gap.
             Evt::ChannelsResumeOverflow { .. } => EvtClass::Durable,
+            // Full call snapshots drive the call UI; a dropped one desyncs it
+            // until re-sync, so close a consumer too slow for it (§10.4).
+            Evt::CallsState { .. } => EvtClass::Durable,
+            // A dropped ICE candidate stalls setup — close rather than drop
+            // (§10.4: signaling is durable, unlike the ephemeral garnish above).
+            Evt::CallsSignal { .. } => EvtClass::Durable,
         }
     }
 }

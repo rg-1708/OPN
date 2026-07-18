@@ -260,3 +260,48 @@ pub struct ListingItem {
     #[ts(type = "string | null")]
     pub expires_at: Option<String>,
 }
+
+// ── calls (OPN-CORE.md §10.4) ─────────────────────────────────────────────────
+
+/// Call medium (§10.4). `calls.start`'s `video: bool` maps here — `false` →
+/// voice, `true` → video. Voice audio always rides pma-voice; WebRTC carries
+/// video only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum CallKind {
+    Voice,
+    Video,
+}
+
+/// Session lifecycle (§10.4) — the FSM's session states. `ringing` until the
+/// first accept, `active` while ≥ 1 participant is joined, `ended` is terminal
+/// (nothing leaves it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum CallSessionState {
+    Ringing,
+    Active,
+    Ended,
+}
+
+/// Per-participant lifecycle (§10.4) — the FSM's participant states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum CallParticipantState {
+    Ringing,
+    Joined,
+    Declined,
+    Left,
+}
+
+/// One participant in a `calls.state` snapshot (§10.4): character id + state.
+/// Device and timestamps stay server-side — opaque to the peer.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CallParticipant {
+    pub character_id: Uuid,
+    pub state: CallParticipantState,
+}

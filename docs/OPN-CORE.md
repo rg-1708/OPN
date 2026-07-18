@@ -487,8 +487,14 @@ standing subscription; voice-target events via tenant link (§5). Voice audio
 for both kinds stays in pma-voice — WebRTC carries video only.
 
 State machine is enforced in the handler (illegal transition → `conflict`).
-Sessions with `state != ended` and no joined participants are reaped by the
-janitor after 60 s — no zombie rings after crashes.
+Sessions still `ringing` (never accepted) after 60 s are reaped by the janitor
+— no zombie rings after crashes. *(Amended 2026-07-18, build: the original
+"no joined participants" predicate was unimplementable — `calls.start` joins the
+caller immediately and a crashed caller's WS disconnect never transitions that
+row, so every real ring keeps a joined participant and would be skipped, letting
+an unanswered ring linger forever and pin both parties busy. A ring only leaves
+`ringing` via accept, so keying the reap on `ringing` + age reaps exactly the
+un-accepted ones and never an `active` call. See reflections 2026-07-18, Sprint 6.)*
 
 ### 10.5 ledger
 

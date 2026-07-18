@@ -230,6 +230,44 @@ pub enum Cmd {
         limit: Option<i64>,
     },
 
+    // ── calls (§10.4) ────────────────────────────────────────────────────
+    /// Start a call to a number (§10.4). Resolves through the directory seam
+    /// (blocked/unknown → `not_found`, privacy); a busy callee → `conflict`.
+    /// `video: false` is a voice call, `true` a video call. Rings the callee via
+    /// notify (the dialer needs no standing sub) and returns `{ call_id }`.
+    #[serde(rename = "calls.start")]
+    CallsStart {
+        callee_number: String,
+        video: bool,
+    },
+    /// Accept a ringing call (§10.4): the caller's participant → joined, session
+    /// → active. Illegal from any non-ringing state → `conflict`.
+    #[serde(rename = "calls.accept")]
+    CallsAccept {
+        call_id: Uuid,
+    },
+    /// Decline a ringing call (§10.4). Ends the session when no one else is
+    /// still ringing or joined.
+    #[serde(rename = "calls.decline")]
+    CallsDecline {
+        call_id: Uuid,
+    },
+    /// Hang up a joined call (§10.4). The last hangup ends the session.
+    #[serde(rename = "calls.hangup")]
+    CallsHangup {
+        call_id: Uuid,
+    },
+    /// Opaque WebRTC signaling relay (§10.4): forwarded verbatim to `to` on
+    /// `call:<id>`, never inspected or stored. Sender and `to` must both be
+    /// active participants of a ringing/active call. `payload` ≤ 16 KB.
+    #[serde(rename = "calls.signal")]
+    CallsSignal {
+        call_id: Uuid,
+        to: Uuid,
+        #[ts(type = "unknown")]
+        payload: serde_json::Value,
+    },
+
     // ── notify (§10.8) ───────────────────────────────────────────────────
     #[serde(rename = "notify.seen")]
     NotifySeen {
