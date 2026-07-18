@@ -1,0 +1,20 @@
+set dotenv-load
+
+dev:
+    docker compose -f docker-compose.dev.yml up -d
+
+down:
+    docker compose -f docker-compose.dev.yml down
+
+# sqlx::test creates a per-test database — needs the CREATEDB-capable owner role
+test: dev
+    DATABASE_URL=${OPN_MIGRATE_DATABASE_URL} cargo test
+
+fmt:
+    cargo fmt
+
+lint:
+    cargo clippy --all-targets -- -D warnings
+
+ts:
+    cargo run -p contracts --bin export_ts

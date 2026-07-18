@@ -1,0 +1,79 @@
+name: CI
+
+on: [push, pull_request]
+
+# rustup reads opn-core/rust-toolchain.toml automatically (commands run in
+# opn-core/), so no explicit toolchain pin here — one source of truth.
+defaults:
+  run:
+    working-directory: opn-core
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: opn-core
+      - run: cargo fmt --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: opn-core
+      - run: cargo clippy --all-targets -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgres://opn_migrate:opn@localhost:5432/opn
+      OPN_MIGRATE_DATABASE_URL: postgres://opn_migrate:opn@localhost:5432/opn
+      REDIS_URL: redis://localhost:6379
+      S3_ENDPOINT: http://localhost:9000
+      S3_BUCKET: opn
+      S3_KEY: opn
+      S3_SECRET: opnsecret
+      OPN_JWT_SECRET: ci-secret
+      OPN_BIND: 127.0.0.1:8080
+      OPN_METRICS_BIND: 127.0.0.1:9090
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: opn-core
+      # Named services: the one-shot createbucket container exits by design,
+      # which would fail `up --wait`. MinIO joins when media tests land.
+      - run: docker compose -f docker-compose.dev.yml up -d --wait postgres redis
+      - run: cargo test --workspace
+
+  contracts-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: opn-core
+      - run: cargo run -p contracts --bin export_ts
+      - run: git diff --exit-code -- crates/contracts/bindings
+
+  sqlx-prepare:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgres://opn_migrate:opn@localhost:5432/opn
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: opn-core
+      - run: cargo install sqlx-cli --no-default-features --features postgres
+      - run: docker compose -f docker-compose.dev.yml up -d --wait postgres
+      - run: cargo sqlx prepare --workspace --check

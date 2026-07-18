@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["crates/contracts", "crates/core", "crates/loadgen"]
+
+[workspace.package]
+edition = "2021"
+license = "UNLICENSED"
+publish = false
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v7", "serde"] }
+ts-rs = { version = "11", features = ["uuid-impl", "serde-json-impl", "no-serde-warnings"] }
