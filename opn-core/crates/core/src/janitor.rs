@@ -29,6 +29,7 @@ pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
             run_task("message_partition", ensure_next_partition(&state.pg)).await;
             run_task("media_pending_reap", media_reap(&state)).await;
             run_task("media_verify", media_verify(&state)).await;
+            run_task("listings_expire", listings_expire(&state.pg)).await;
             // In-process, no DB: buckets idle > 10 min go away (§12).
             run_task("ratelimit_sweep", async { Ok(state.limits.sweep_idle()) }).await;
         }
@@ -90,6 +91,17 @@ pub async fn retired_numbers_sweep(pool: &PgPool) -> Result<u64> {
         pool,
         "retired_numbers_sweep",
         "DELETE FROM retired_numbers WHERE freed_at < now() - interval '30 days'",
+    )
+    .await
+}
+
+/// Deletes expired listings (§10.7). Reads hide expired rows already, so this is
+/// pure GC; SQL-only, so it rides the shared world-scoped sweep helper.
+pub async fn listings_expire(pool: &PgPool) -> Result<u64> {
+    sweep_worlds(
+        pool,
+        "listings_expire",
+        "DELETE FROM listings WHERE expires_at IS NOT NULL AND expires_at < now()",
     )
     .await
 }

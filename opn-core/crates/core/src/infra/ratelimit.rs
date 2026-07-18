@@ -51,6 +51,11 @@ pub fn class_of(cmd: &contracts::Cmd) -> Class {
         // Receipts are high-frequency, cheap watermark bumps — read-rate fits.
         | Cmd::ChannelsMarkDelivered { .. }
         | Cmd::ChannelsMarkRead { .. }
+        // Directory reads: cheap indexed lookups.
+        | Cmd::DirectoryContacts
+        | Cmd::DirectoryBlocks
+        | Cmd::DirectoryResolve { .. }
+        | Cmd::DirectoryListings { .. }
         | Cmd::NotifySeen { .. } => Class::Read,
         Cmd::IdentityAppLogin { .. }
         | Cmd::IdentitySetSettings { .. }
@@ -67,6 +72,13 @@ pub fn class_of(cmd: &contracts::Cmd) -> Class {
         | Cmd::ChannelsMemberRemove { .. }
         // A commit is a cheap owner-scoped UPDATE; social-rate is plenty.
         | Cmd::MediaCommit { .. }
+        // Directory writes: occasional contact/block/listing edits.
+        | Cmd::DirectoryContactUpsert { .. }
+        | Cmd::DirectoryContactDelete { .. }
+        | Cmd::DirectoryBlock { .. }
+        | Cmd::DirectoryUnblock { .. }
+        | Cmd::DirectoryListingCreate { .. }
+        | Cmd::DirectoryListingDelete { .. }
         | Cmd::NotifyClear => Class::Social,
         // Issuing a presigned upload signs policies and reserves a row — the
         // costliest command that isn't the hot path. Tight budget (§12).

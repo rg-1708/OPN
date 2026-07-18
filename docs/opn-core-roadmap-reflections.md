@@ -6,6 +6,144 @@ to OPN-CORE.md as CDRs — this file records *how the build actually went*.
 
 ---
 
+## 2026-07-18 (late night) — Sprint 5 **part B** (directory: contacts, blocks, opaque resolve, block enforcement at open_direct, listings + cursor + janitor expiry): built, verified live, all Sprint 5 exit criteria now closed
+
+Part A stopped on the media/directory table seam; part B is the other half.
+The two share no tables and no code, so part B started from the green part-A
+base and lands the whole directory primitive. With it, **Sprint 5 is complete**
+— every exit criterion passes.
+
+### What exists now
+
+- **Migration `0008_directory.sql`** — three FORCE-RLS world-scoped tables:
+  `contacts` (PK `(owner_character, number)`), `blocks` (PK
+  `(blocker_character, blocked_number)`), `listings` (id PK, app-scoped, optional
+  `expires_at`). Two listing indexes: the feed keyset
+  `(world_id, app_id, created_at DESC, id DESC)` and a partial expiry index.
+- **`primitives/directory/mod.rs`** — rewritten from the Sprint-3 resolve stub
+  into the full primitive (SQL inline, media-style). Ten commands:
+  `contact_upsert` / `contact_delete` / `contacts`, `block` / `unblock` /
+  `blocks`, `resolve`, `listing_create` / `listing_delete` / `listings`
+  (cursor). The internal `resolve(tx, caller, number)` now filters blocked pairs
+  in **both** directions (caller blocked target, or target blocked caller's own
+  number) → `None`, so a block is indistinguishable from an unknown number.
+- **Block enforcement live at `channels.open_direct`** (Sprint 5 item 8): the
+  store's `resolve` call now passes the caller, so a blocked pair resolves to
+  `None` → `NotFound`, byte-identical to no-such-number. One-line change at the
+  seam; no open_direct logic moved.
+- **`directory.resolve`** returns `{ reachable, number, display_name }` — never a
+  character id. `display_name` is the caller's **own** saved contact label, so it
+  leaks nothing about the target and is present/absent independent of whether the
+  number is real. This is the roadmap's chosen "no token machinery" path (§10.7,
+  item 7) made concrete.
+- **`listings_expire` janitor task** on the 30 s tick (SQL-only → rides the
+  shared `sweep_worlds` helper). Wired dispatch arms, rate classes (writes →
+  `Social`, reads → `Read`), `wire_name`, the coverage match-test (all ten
+  commands), and three new exported binding types (`ContactItem`,
+  `ResolveResult`, `ListingItem`).
+
+### Decisions closed during implementation (roadmap deviations, all ponytail)
+
+1. **Directory is all-WS — no HTTP routes.** §10.7 names every operation a
+   `directory.*` command; media/inbox split reads to HTTP, but directory did
+   not, so the reads return `{ items, next_cursor }` in the ack. Fewer moving
+   parts (no JWT-extractor plumbing) and it satisfies "HTTP routes in
+   route-coverage test" trivially — there are none to cover.
+2. **`listings.owner_character` added** — the §10.7 tuple omits an owner, but
+   CRUD's delete needs one to scope authz (delete-not-yours → `NotFound`, no
+   leak). A column addition, logged here rather than a CDR (same weight as
+   part A's "no S3 SDK" call).
+3. **Contacts unpaginated, listings cursor-paged.** A character's contact book is
+   a naturally bounded set; world-wide listings are not. Only listings get the
+   cursor idiom (which is also all the roadmap asked for).
+4. **`avatar_media` carries no FK to `media(id)`.** This matches the
+   message-attachment precedent (media ids in a message body have no FK either):
+   ownership+live is validated at write time, and a later-deleted avatar just
+   renders missing. An FK would instead make the media janitor's `DELETE` fail
+   while a reverted/reaped row is still referenced by a contact — a self-inflicted
+   foot-gun avoided. (Caught in self-review before the reviewers ran.)
+5. **Blocks are free-form numbers, no existence check.** You may block a number
+   that isn't a character yet; the resolve-time filter is where it bites. A
+   pre-emptive block must be allowed and must not reveal whether the number is
+   real.
+
+### The keeper this session (the point of rule 4)
+
+**The adversarial review found the read-path gap the happy-path tests didn't.**
+Every directory *write* guards `number.len() > NUMBER_MAX`, but I'd left the
+*read* path (`resolve` / `resolve_public`) uncapped — a multi-megabyte `number`
+would reach an indexed lookup unbounded. The tests were green because no test
+sent a pathological number; the fan-out reviewer sent one on paper. Two fixes
+landed: the cap moved into the shared `resolve` (root-cause: one guard now
+protects open_direct, resolve_public, and Sprint 6's future `calls.start`) plus
+an early cap in `resolve_public` so its second query short-circuits too. The
+second reviewer caught an unbounded `ttl_secs` (i64::MAX overflows
+`now() + make_interval` into a 500 instead of a clean `Invalid`) and a vacuous
+`.all()`-over-empty-vec test assertion. All three were real, all three fixed,
+each now has a test. Lesson: **write-path validation does not cover the read
+path**, and a happy-path suite will not surface it — the adversarial pass is the
+budgeted verification that does (ADR-1: verification is work, not polish).
+
+### Verification (rule 4)
+
+- `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` clean.
+- Full suite green across every binary (real Postgres + Redis; MinIO not needed
+  — the one media touch, avatar ownership, is a DB count over a directly-seeded
+  `live` row). New `tests/directory.rs` (5 tests):
+  - `contacts_crud_roundtrip`: create → list → upsert-replaces → owned-vs-foreign
+    avatar → idempotent delete.
+  - `block_unblock_and_list`: idempotent block, list, unblock.
+  - `resolve_unknown_known_and_blocked_indistinguishable`: unknown→false,
+    known→true+own-label, **callee-side and caller-side block both → false**
+    (the privacy invariant), plus the over-long/empty number cap.
+  - `open_direct_blocked_pair_both_directions`: baseline opens; caller-side block
+    → `NotFound`; unblock restores; callee-side block → `NotFound`.
+  - `listings_create_list_delete_expire`: negative + i64::MAX ttl rejected;
+    cursor paging (no dup/skip across the boundary); delete-not-yours →
+    `NotFound`; owner delete; expiry hidden at read time then janitor deletes
+    exactly one.
+- Two adversarial reviewers (privacy/security, correctness/SQL) confirmed the
+  block≡unknown invariant, both-direction block correctness, world isolation, and
+  no character-id leak on any directory path.
+
+### Exit criteria status (Sprint 5 — now fully closed)
+
+| Criterion | Status |
+|---|---|
+| Photo round-trips dev-stack | **PASS** (part A). |
+| Verification sweep catches a cap bypass | **PASS** (part A). |
+| All media/directory commands in coverage match-test; HTTP routes in route-coverage test | **PASS** — directory commands now in the match-test; directory adds no HTTP routes, so the route side is trivially satisfied. |
+
+### Reflection
+
+- **The table seam paid a third time.** Media↔directory (Sprint 5) and the two
+  Sprint-4 halves before it: splitting on shared-nothing boundaries keeps each
+  half a complete, reviewable, green slice. Cheap dividend, taken again.
+- **Adversarial review earned its keep.** Three real fixes from two agents on a
+  ~400-line primitive, none of which the happy-path suite would have caught. On a
+  stability-first project this is exactly the budgeted verification ADR-1 buys —
+  not a nicety.
+- **Root-cause over symptom held.** The number cap went into the shared `resolve`
+  (one guard, every caller including Sprint 6's) rather than patched per-handler.
+- **Still not committed.** Six sprints of work remain untracked. The first push is
+  still the single highest-leverage undone thing — it now arms the drift gate with
+  three more binding files and unblocks Sprint 4's three-night perf smoke.
+
+### Next session
+
+1. **The first push** — unchanged, still the critical path (drift gate +
+   Sprint 4's three-night smoke).
+2. **Sprint 6 — calls + tenant link.** The FSM-as-data, signaling relay,
+   `/link` gateway, re-sync. Depends on Sprint 5 (block check at `calls.start`
+   reuses the now-caller-aware `resolve`; notify ring class from Sprint 3) —
+   all in place.
+3. **Media loose ends (small, non-blocking):** `media.favourite` + object
+   tagging; the `expired` tombstone state.
+4. Still open from before: online-member badging, Bearer case-sensitivity,
+   `identity.me` own-last-seen.
+
+---
+
 ## 2026-07-18 (night, latest) — Sprint 5 **part A** (media: presigned uploads + janitor verify + gallery + attachment un-gate): built, verified live against MinIO; directory (part B) deferred
 
 Same pacing move as Sprint 4: Sprint 5 has two disjoint halves — **(A)** media

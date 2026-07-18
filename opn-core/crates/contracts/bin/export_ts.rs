@@ -23,5 +23,10 @@ fn main() {
     // as a dependency of UploadTicket).
     contracts::UploadTicket::export_all_to(dir).expect("export UploadTicket");
     contracts::MediaItem::export_all_to(dir).expect("export MediaItem");
+    // directory: contact/listing rows and the opaque resolve result ride acks as
+    // opaque values, so export them explicitly for the TS SDK.
+    contracts::ContactItem::export_all_to(dir).expect("export ContactItem");
+    contracts::ResolveResult::export_all_to(dir).expect("export ResolveResult");
+    contracts::ListingItem::export_all_to(dir).expect("export ListingItem");
     println!("bindings written to {dir}");
 }

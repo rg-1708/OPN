@@ -15,8 +15,9 @@ use tracing::Instrument;
 use super::registry::ConnHandle;
 use super::topic::TopicKind;
 use crate::infra::auth::mint_jwt;
+use crate::infra::cursor;
 use crate::infra::ratelimit::class_of;
-use crate::primitives::{channels, identity, media, notify, Fail};
+use crate::primitives::{channels, directory, identity, media, notify, Fail};
 use crate::state::AppState;
 
 /// Handles one parsed frame, returns the ack. Never panics, never closes —
@@ -277,6 +278,83 @@ async fn run(
             Ok(None)
         }
 
+        Cmd::DirectoryContactUpsert {
+            number,
+            display_name,
+            avatar_media,
+            meta,
+        } => {
+            directory::contact_upsert(state, who, &number, &display_name, avatar_media, meta)
+                .await?;
+            Ok(None)
+        }
+        Cmd::DirectoryContactDelete { number } => {
+            directory::contact_delete(state, who, &number).await?;
+            Ok(None)
+        }
+        Cmd::DirectoryContacts => {
+            let list = directory::contacts(state, who).await?;
+            Ok(Some(
+                serde_json::to_value(list).map_err(anyhow::Error::from)?,
+            ))
+        }
+        Cmd::DirectoryBlock { number } => {
+            directory::block(state, who, &number).await?;
+            Ok(None)
+        }
+        Cmd::DirectoryUnblock { number } => {
+            directory::unblock(state, who, &number).await?;
+            Ok(None)
+        }
+        Cmd::DirectoryBlocks => {
+            let nums = directory::blocks(state, who).await?;
+            Ok(Some(
+                serde_json::to_value(nums).map_err(anyhow::Error::from)?,
+            ))
+        }
+        Cmd::DirectoryResolve { number } => {
+            let res = directory::resolve_public(state, who, &number).await?;
+            Ok(Some(
+                serde_json::to_value(res).map_err(anyhow::Error::from)?,
+            ))
+        }
+        Cmd::DirectoryListingCreate {
+            app_id,
+            kind,
+            title,
+            body,
+            contact_number,
+            ttl_secs,
+        } => Ok(Some(
+            directory::listing_create(
+                state,
+                who,
+                &app_id,
+                &kind,
+                &title,
+                body,
+                &contact_number,
+                ttl_secs,
+            )
+            .await?,
+        )),
+        Cmd::DirectoryListingDelete { id } => {
+            directory::listing_delete(state, who, id).await?;
+            Ok(None)
+        }
+        Cmd::DirectoryListings {
+            app_id,
+            cursor,
+            limit,
+        } => {
+            let cur = cursor.as_deref().map(cursor::decode).transpose()?;
+            let page = directory::listings(state, who, &app_id, cur, limit.unwrap_or(50)).await?;
+            Ok(Some(json!({
+                "items": page.items,
+                "next_cursor": page.next_cursor,
+            })))
+        }
+
         Cmd::NotifySeen { ids } => {
             notify::seen(&state.pg, who, &ids).await?;
             Ok(None)
@@ -315,6 +393,16 @@ fn wire_name(cmd: &Cmd) -> &'static str {
         Cmd::ChannelsMemberRemove { .. } => "channels.member_remove",
         Cmd::MediaRequestUpload { .. } => "media.request_upload",
         Cmd::MediaCommit { .. } => "media.commit",
+        Cmd::DirectoryContactUpsert { .. } => "directory.contact_upsert",
+        Cmd::DirectoryContactDelete { .. } => "directory.contact_delete",
+        Cmd::DirectoryContacts => "directory.contacts",
+        Cmd::DirectoryBlock { .. } => "directory.block",
+        Cmd::DirectoryUnblock { .. } => "directory.unblock",
+        Cmd::DirectoryBlocks => "directory.blocks",
+        Cmd::DirectoryResolve { .. } => "directory.resolve",
+        Cmd::DirectoryListingCreate { .. } => "directory.listing_create",
+        Cmd::DirectoryListingDelete { .. } => "directory.listing_delete",
+        Cmd::DirectoryListings { .. } => "directory.listings",
         Cmd::NotifySeen { .. } => "notify.seen",
         Cmd::NotifyClear => "notify.clear",
     }

@@ -15,7 +15,7 @@ pub use envelope::{ClientFrame, ServerMsg};
 pub use error::{ErrBody, ErrCode};
 pub use evt::{Evt, EvtClass};
 pub use types::{
-    AppAccountInfo, ChannelSummary, CharacterInfo, DeviceInfo, InboxItem, MePayload, MediaItem,
-    MediaKind, MessageBody, MessageItem, MessagePreview, NotifyClass, ReceiptKind,
-    SessionMintResponse, UploadTarget, UploadTicket,
+    AppAccountInfo, ChannelSummary, CharacterInfo, ContactItem, DeviceInfo, InboxItem, ListingItem,
+    MePayload, MediaItem, MediaKind, MessageBody, MessageItem, MessagePreview, NotifyClass,
+    ReceiptKind, ResolveResult, SessionMintResponse, UploadTarget, UploadTicket,
 };

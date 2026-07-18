@@ -50,6 +50,18 @@ fn every_cmd_names_its_covering_test() {
             Cmd::MediaCommit { .. } => {
                 "media::request_upload_commit_roundtrip, media::commit_foreign_forbidden"
             }
+            Cmd::DirectoryContactUpsert { .. } => "directory::contacts_crud_roundtrip",
+            Cmd::DirectoryContactDelete { .. } => "directory::contacts_crud_roundtrip",
+            Cmd::DirectoryContacts => "directory::contacts_crud_roundtrip",
+            Cmd::DirectoryBlock { .. } => "directory::block_unblock_and_list",
+            Cmd::DirectoryUnblock { .. } => "directory::block_unblock_and_list",
+            Cmd::DirectoryBlocks => "directory::block_unblock_and_list",
+            Cmd::DirectoryResolve { .. } => {
+                "directory::resolve_unknown_known_and_blocked_indistinguishable"
+            }
+            Cmd::DirectoryListingCreate { .. } => "directory::listings_create_list_delete_expire",
+            Cmd::DirectoryListingDelete { .. } => "directory::listings_create_list_delete_expire",
+            Cmd::DirectoryListings { .. } => "directory::listings_create_list_delete_expire",
             Cmd::NotifySeen { .. } => "notify::seen_marks_rows",
             Cmd::NotifyClear => "notify::clear_empties_inbox",
         }

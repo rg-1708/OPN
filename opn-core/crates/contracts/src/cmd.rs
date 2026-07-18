@@ -161,6 +161,75 @@ pub enum Cmd {
         media_id: Uuid,
     },
 
+    // ── directory (§10.7) ────────────────────────────────────────────────
+    /// Create or update a contact, keyed on `number` (§10.7). Upsert: a repeat
+    /// number replaces the display fields. `avatar_media`, if present, must be a
+    /// live media owned by the caller (`invalid` otherwise).
+    #[serde(rename = "directory.contact_upsert")]
+    DirectoryContactUpsert {
+        number: String,
+        display_name: String,
+        #[ts(type = "string | null")]
+        avatar_media: Option<Uuid>,
+        #[ts(type = "unknown")]
+        meta: Option<serde_json::Value>,
+    },
+    /// Delete one of the caller's contacts by number.
+    #[serde(rename = "directory.contact_delete")]
+    DirectoryContactDelete {
+        number: String,
+    },
+    /// Snapshot the caller's contact book (§10.7).
+    #[serde(rename = "directory.contacts")]
+    DirectoryContacts,
+    /// Block a number (§10.7). Idempotent; enforced at action points, not here.
+    #[serde(rename = "directory.block")]
+    DirectoryBlock {
+        number: String,
+    },
+    /// Unblock a number (idempotent).
+    #[serde(rename = "directory.unblock")]
+    DirectoryUnblock {
+        number: String,
+    },
+    /// The caller's blocked numbers (so the client can render an unblock list).
+    #[serde(rename = "directory.blocks")]
+    DirectoryBlocks,
+    /// Opaque number resolution (§10.7): `{ reachable, number, display_name }`,
+    /// never a character id. A blocked pair reads exactly like an unknown number.
+    #[serde(rename = "directory.resolve")]
+    DirectoryResolve {
+        number: String,
+    },
+    /// Post a listing (§10.7). `ttl_secs`, if present, sets the expiry the
+    /// janitor sweeps by; absent = never expires.
+    #[serde(rename = "directory.listing_create")]
+    DirectoryListingCreate {
+        app_id: String,
+        kind: String,
+        title: String,
+        #[ts(type = "unknown")]
+        body: Option<serde_json::Value>,
+        contact_number: String,
+        #[ts(type = "number | null")]
+        ttl_secs: Option<i64>,
+    },
+    /// Delete one of the caller's own listings.
+    #[serde(rename = "directory.listing_delete")]
+    DirectoryListingDelete {
+        id: Uuid,
+    },
+    /// A page of active listings for an app (§10.7), newest-first on the cursor
+    /// idiom (CDR-7).
+    #[serde(rename = "directory.listings")]
+    DirectoryListings {
+        app_id: String,
+        #[ts(type = "string | null")]
+        cursor: Option<String>,
+        #[ts(type = "number | null")]
+        limit: Option<i64>,
+    },
+
     // ── notify (§10.8) ───────────────────────────────────────────────────
     #[serde(rename = "notify.seen")]
     NotifySeen {

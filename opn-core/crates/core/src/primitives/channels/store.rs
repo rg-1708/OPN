@@ -145,7 +145,10 @@ pub async fn open_direct(
 ) -> Result<Uuid, Fail> {
     let mut tx = world_tx(pool, world).await?;
 
-    let callee = directory::resolve(&mut tx, number)
+    // Resolve through the directory seam: an unknown OR blocked number (either
+    // direction) reads as None here, so a block is `NotFound` — indistinguishable
+    // from no-such-number (§10.7 privacy).
+    let callee = directory::resolve(&mut tx, caller, number)
         .await?
         .ok_or(Fail::Code(ErrCode::NotFound))?;
     if callee == caller {

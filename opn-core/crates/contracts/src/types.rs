@@ -209,3 +209,54 @@ pub struct MediaItem {
     pub thumb_url: Option<String>,
     pub created_at: String,
 }
+
+// ── directory (OPN-CORE.md §10.7) ─────────────────────────────────────────────
+
+/// One row of the caller's private contact book (`directory.contacts`).
+/// Contacts point at raw numbers; a number resolves to a character only at
+/// action time, so this carries no character id.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ContactItem {
+    pub number: String,
+    pub display_name: String,
+    /// A live media owned by the caller, validated at write time (§10.7).
+    #[ts(type = "string | null")]
+    pub avatar_media: Option<Uuid>,
+    #[ts(type = "unknown")]
+    pub meta: serde_json::Value,
+    pub created_at: String,
+}
+
+/// `directory.resolve` result (§10.7): opaque routing. `reachable` is the only
+/// signal — false for both an unknown number and a blocked pair, so a block is
+/// indistinguishable from no-such-number (privacy). `display_name` is the
+/// caller's OWN saved label for the number (their data, never the target's), so
+/// it leaks nothing about the character behind the number. No character id ever
+/// crosses this wire.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ResolveResult {
+    pub reachable: bool,
+    pub number: String,
+    #[ts(type = "string | null")]
+    pub display_name: Option<String>,
+}
+
+/// One listing (`directory.listings`, §10.7): an app-scoped ad/posting with an
+/// optional TTL. `contact_number` is the number a reader would call — free-form,
+/// not a resolved character.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ListingItem {
+    pub id: Uuid,
+    pub app_id: String,
+    pub kind: String,
+    pub title: String,
+    #[ts(type = "unknown")]
+    pub body: serde_json::Value,
+    pub contact_number: String,
+    pub created_at: String,
+    #[ts(type = "string | null")]
+    pub expires_at: Option<String>,
+}
