@@ -1331,6 +1331,16 @@ dependencies = [
 [[package]]
 name = "opn-loadgen"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "contracts",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.28.0",
+ "uuid",
+]
 
 [[package]]
 name = "parking"

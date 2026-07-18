@@ -6,6 +6,154 @@ to OPN-CORE.md as CDRs — this file records *how the build actually went*.
 
 ---
 
+## 2026-07-18 (night) — Sprint 4 **part B** (`opn-loadgen` v0 + nightly perf-smoke machinery): built, verified live; three-night criterion still OPEN
+
+Closes the loadgen half deferred from part A. The load generator exists, runs
+end to end against a live stack, and the nightly perf smoke is wired — but its
+exit criterion ("green three consecutive nights") cannot *close* until there is
+a remote to run the schedule on. All the machinery is in place; the clock is the
+only thing left.
+
+### What exists now
+
+- **`crates/loadgen/` — the whole crate** (was a one-line placeholder):
+  - `http.rs` — a ~40-line plaintext HTTP mint client (`POST … Connection: close`,
+    read-to-EOF). Seeds the population over the **real** mint API, treating Core
+    as a black box, exactly as the roadmap wants ("`--seed` mode that calls the
+    mint API").
+  - `driver.rs` — one WS connection's lifecycle + measurement. Connections run in
+    **pairs**: the `Left` half `open_direct`s the `Right` half's number, hands the
+    `channel_id` over a `oneshot`, both `sub ch:<id>`, then both send. Every send
+    embeds a monotonic microsecond stamp in `body.meta.t`; the **peer** (same
+    process, same `Instant` epoch) reads it back off the `channels.message` push
+    to compute clock-safe cross-connection delivery latency. Ack RTT is a
+    `pending: HashMap<frame_id, Instant>` matched on `reply_to`.
+  - `main.rs` — scenario load (JSON), seed, aligned launch, merge, report, exit.
+  - `scenarios/smoke.json` — the committed nightly scenario (300 conns, 30 msg/s,
+    300 s, gates ack p99 < 25 ms + zero durable closes). `api_key: ""`, injected
+    at runtime via `OPN_LOADGEN_API_KEY`.
+- **`.github/workflows/perf-smoke.yml`** — `schedule` (nightly `0 3 * * *`) +
+  `workflow_dispatch` only, never push/PR. Release build, backgrounded server +
+  healthz poll, tenant mint → key capture via `$GITHUB_ENV`, self-asserting
+  loadgen run, summary artifact, teardown. (Cross-cutting rule 5.)
+- **README `## Load testing`** and the whole thing is clippy `-D warnings` /
+  `cargo fmt` clean; 4 new loadgen unit tests (percentiles, host parse, HTTP
+  header/body split) — all green.
+- **Zero new crates in `Cargo.lock`.** loadgen's deps (`tokio-tungstenite`,
+  `futures-util`, `anyhow`) were already compiled for core's tests/deps. The tool
+  cost the lockfile nothing.
+
+### Decisions closed during implementation (roadmap deviations, all ponytail)
+
+The roadmap names three specific tools for loadgen; all three were shed, each for
+the codebase's established "one less dependency" reason (cf. hand-rolled cursor,
+tenant cache, gif allowlist):
+
+1. **hdrhistogram → exact sorted-`Vec` percentiles.** The v0 smoke is ~9 k
+   samples where an exact nearest-rank percentile beats a bucketed estimate and
+   needs no dep. Marked with a `ponytail:` note: the Vec is fine to ~1 M samples;
+   **Sprint 10's 24 h soak** will record hundreds of millions and wants
+   hdrhistogram or reservoir sampling *then*, not now.
+2. **TOML → JSON scenario.** `serde_json` is already a workspace dep; the config
+   is six fields; a committed named scenario file (the actual point) works
+   identically. No `toml` crate.
+3. **reqwest → hand-rolled plaintext HTTP.** loadgen only ever mints against a
+   local/compose Core over plain HTTP; one request shape with `Connection: close`
+   is ~40 lines, versus reqwest's ~50-crate tree. Noted: reach for reqwest if a
+   TLS endpoint or connection reuse ever appears.
+4. **Aligned start via a warmup instant, not `tokio::sync::Barrier`.** All
+   connections compute one shared `start_at = epoch + warmup` and `interval_at`
+   their first send to it. A real `Barrier` of size N deadlocks the whole run if
+   one connection fails setup; the instant does not.
+5. **Delivery latency counts peer messages only** (`sender != own char`). The
+   sender's own fan-out copy would measure the loopback path, not cross-connection
+   delivery — a truer-but-faster number that would flatter the p99.
+
+### The two findings the live run caught (this session's keepers)
+
+Both surfaced on the **first** real end-to-end run — neither is visible to a
+desk-check or a compile:
+
+1. **The gateway's own per-IP pre-auth cap breaks single-IP load tests.**
+   `OPN_PREAUTH_PER_IP_MAX` defaults to **5** (§4.1 admission control). A loadgen
+   runs every connection from `127.0.0.1`, so the first run reported **7 of 10
+   connections 429'd** before the WS upgrade. The 300-conn nightly smoke would
+   have reported ~295 errors and exited 2 on its *first scheduled night* — a
+   green-looking machine failing for a reason unrelated to performance. Fix: the
+   load-test deployment must raise the cap above the connection count. Added
+   `OPN_PREAUTH_PER_IP_MAX: '400'` to `perf-smoke.yml`'s env and a note to the
+   README. This is "real-runtime-catches-desk-checks" reaching a *new* layer —
+   past Postgres (Sprints 0/1) and the async scheduler (part A), now the
+   gateway's admission control.
+2. **Aggregate send rate is bounded by `connections × Msg-budget`.** The `Msg`
+   rate class is 1.0/s sustained (5 burst). A first quick scenario (10 conns,
+   20 msg/s → 2/s per conn) drew 6 `rate_limited` acks. The committed smoke
+   (30 msg/s over 300 conns = 0.1/s each) is comfortably under, but the ceiling
+   is real: a valid scenario needs `total_msgs_per_sec ≤ connections`. loadgen
+   handles a `rate_limited` ack gracefully (counts it, excludes it from ack-RTT)
+   rather than treating it as an error.
+
+Neither is a loadgen bug — the tool reported both accurately, which is the tool
+working. But #1 would have made the nightly smoke red for the wrong reason, so
+catching it now (before any push) is the session's actual save.
+
+### Verification (rule 4)
+
+Live e2e against the compose stack + real server: **20 conns, 10 msg/s, 6 s →
+PASS**. 0 errors, 0 `rate_limited`, 0 durable/other closes; 80 sends / 160 recvs
+(two subscribers per channel) / 80 peer-deliveries; ack p99 **21.8 ms**, delivery
+p99 **21.8 ms** — in a **debug** build, so release (the smoke's mandate) will be
+far under the 25 ms gate. Seeding, pairing, cross-connection delivery
+measurement, ack correlation, JSON summary, human table, and the 0/1/2 exit codes
+all exercised.
+
+### Exit criteria status (Sprint 4, updated)
+
+| Criterion | Status |
+|---|---|
+| Every `channels.*` command in the coverage match-test | **PASS** (part A). |
+| Nightly perf smoke live and green three consecutive nights | **OPEN — machinery complete.** Workflow, scenario, and self-asserting binary all exist and pass a live run; only a remote + three scheduled nights remain. Blocked on the same first-push that has been open since Sprint 0. |
+| Messages surface demo-able end to end vs the shell dev build | **N/A** — coordination point with opn-ui, not a blocker. |
+
+### Reflection
+
+- **The subagent recipe held, with one sequencing lesson.** Main thread wrote the
+  whole coupled crate (the concurrency + measurement core has no independent test
+  leg to split off — the loadgen *is* the test tool); one agent wrote the CI
+  workflow + README + the exit-code-preservation shell in parallel, off a fixed
+  CLI contract. It even improved on my instruction — I'd suggested `> file;
+  code=$?`, which `set -e` aborts before the capture; the agent used `|| code=$?`,
+  which survives. The independence earned its keep again.
+- **But the independent leg can't know what the live run hasn't taught yet.** The
+  agent copied the CI env verbatim from the `test` job — correct at the time — and
+  I had to patch in `OPN_PREAUTH_PER_IP_MAX` *after* the live run revealed the
+  429. The infra author finalized before the empirical finding existed. Lesson for
+  next time: run the smoke once locally to discovery-completion *before* handing
+  the CI env to an agent, or expect to patch its env after.
+- **Splitting Sprint 4 was vindicated twice over.** Part A shipped a reviewed
+  feature surface; part B got a loadgen designed without time pressure, and the
+  gateway-cap finding had room to surface. Bundling would have buried both.
+- **Not committed** — the pile is now four-and-a-half sprints tall and still
+  untracked. The first push is no longer just hygiene: it is the literal
+  precondition for closing Sprint 4's last exit criterion (the nightly smoke can't
+  run without a remote) *and* Sprint 0's CI/drift-gate criterion. That is the one
+  thing worth doing before more code.
+
+### Next session
+
+1. **The first push** — it now unblocks two sprints at once (Sprint 0's CI/drift
+   gate, Sprint 4's three-night smoke) and arms the contracts drift gate for
+   everything since. This has been "the operator's call" for five sessions; it is
+   now on the critical path.
+2. **Sprint 5 — Media + directory.** Un-gates the `channels` attachment check
+   (Sprint 3 decision 6) into the real owned+live count; presigned MinIO uploads,
+   janitor verification sweep, contacts/blocks/listings, block enforcement at
+   `open_direct`. MinIO joins the compose `--wait` set in CI here.
+3. Still open, minor, none blocking: online-member badging (Sprint 3 dec. 9),
+   Bearer-scheme case-sensitivity, `identity.me` own-last-seen (part A dec. 6).
+
+---
+
 ## 2026-07-18 (evening) — Sprint 4 **part A** (channels feature-complete + cursor idiom): built, green; loadgen (part B) deferred
 
 Deliberate stop mid-sprint. Sprint 4 has two disjoint halves: **(A)** the

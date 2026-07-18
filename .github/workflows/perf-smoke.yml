@@ -1,0 +1,98 @@
+name: Perf smoke
+
+# Nightly WebSocket load smoke. Expensive (~5.5 min run) and self-asserting, so
+# it never runs on push/PR — only on the nightly schedule or a manual dispatch.
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+jobs:
+  perf-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: opn-core
+    env:
+      DATABASE_URL: postgres://opn_migrate:opn@localhost:5432/opn
+      OPN_MIGRATE_DATABASE_URL: postgres://opn_migrate:opn@localhost:5432/opn
+      REDIS_URL: redis://localhost:6379
+      S3_ENDPOINT: http://localhost:9000
+      S3_BUCKET: opn
+      S3_KEY: opn
+      S3_SECRET: opnsecret
+      OPN_JWT_SECRET: ci-secret
+      OPN_BIND: 127.0.0.1:8080
+      OPN_METRICS_BIND: 127.0.0.1:9090
+      # loadgen's 300 connections all originate from one IP; the per-IP pre-auth
+      # cap (default 5) would 429 all but 5 of them. Raise it above the
+      # connection count for the load test. The global cap (default 1000) already
+      # covers 300 concurrent pre-auth sockets.
+      OPN_PREAUTH_PER_IP_MAX: '400'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: opn-core
+
+      - run: docker compose -f docker-compose.dev.yml up -d --wait postgres redis
+
+      # Release is mandatory: a debug build's latency would blow the 25 ms p99
+      # gate for reasons unrelated to the server.
+      - name: Build release
+        run: cargo build --release -p opn-core -p opn-loadgen
+
+      # Background the server (it runs migrations at startup, then serves) and
+      # poll healthz. Redirect its output to a file so the backgrounded process
+      # does not hold the step's stdout open and hang it.
+      - name: Start server and wait for health
+        run: |
+          nohup ./target/release/opn-core > opn-core.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8080/healthz > /dev/null; then
+              echo "server healthy"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "server did not become healthy within 30s" >&2
+          cat opn-core.log >&2
+          exit 1
+
+      # Mint a tenant and hand its one-time API key to the next step via
+      # $GITHUB_ENV. The admin CLI reads OPN_MIGRATE_DATABASE_URL from env.
+      - name: Create tenant and capture API key
+        run: |
+          out=$(./target/release/opn-core admin create-tenant --name loadgen --new-world loadgenworld)
+          echo "$out"
+          key=$(echo "$out" | sed -n 's/^api key:[[:space:]]*//p')
+          if [ -z "$key" ]; then
+            echo "failed to capture api key from admin output" >&2
+            exit 1
+          fi
+          echo "OPN_LOADGEN_API_KEY=$key" >> "$GITHUB_ENV"
+
+      # loadgen self-asserts: exit 1 on a breached threshold, 2 on op error.
+      # Capture its stdout (the one JSON summary line) to a file AND preserve its
+      # exit code — a plain pipe to `tee` would mask it, and under `set -e` a
+      # direct `> file; code=$?` never reaches the capture. `|| code=$?` does.
+      - name: Run perf smoke
+        run: |
+          code=0
+          ./target/release/opn-loadgen --scenario crates/loadgen/scenarios/smoke.json \
+            > perf-smoke-summary.json || code=$?
+          cat perf-smoke-summary.json
+          exit $code
+
+      - name: Upload summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-smoke-summary
+          path: opn-core/perf-smoke-summary.json
+
+      - name: Tear down services
+        if: always()
+        run: docker compose -f docker-compose.dev.yml down

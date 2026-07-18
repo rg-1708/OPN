@@ -1,0 +1,14 @@
+{
+  "_comment": "Nightly perf smoke (roadmap cross-cutting rule 5, Sprint 4). 300 conns, 30 msg/s aggregate, 5 min. api_key is injected at runtime via OPN_LOADGEN_API_KEY.",
+  "target_http": "http://127.0.0.1:8080",
+  "target_ws": "ws://127.0.0.1:8080/ws",
+  "api_key": "",
+  "connections": 300,
+  "duration_secs": 300,
+  "total_msgs_per_sec": 30.0,
+  "warmup_secs": 5,
+  "typing_every": 5,
+  "read_every": 10,
+  "assert_ack_p99_ms": 25.0,
+  "assert_no_durable_closes": true
+}
