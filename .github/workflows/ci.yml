@@ -79,3 +79,15 @@ jobs:
       - run: cargo install sqlx-cli --no-default-features --features postgres
       - run: docker compose -f docker-compose.dev.yml up -d --wait postgres
       - run: cargo sqlx prepare --workspace --check
+
+  cargo-deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: opn-core
+      - run: cargo install cargo-deny --locked
+      # Discovers deny.toml in opn-core (the file-level working-directory).
+      - run: cargo deny check

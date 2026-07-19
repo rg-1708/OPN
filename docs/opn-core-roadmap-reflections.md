@@ -6,7 +6,145 @@ to OPN-CORE.md as CDRs — this file records *how the build actually went*.
 
 ---
 
-## 2026-07-19 (latest) — Sprint 8 **part B** (feed read surface: home fan-out-on-read, profile, post detail + comments, hashtag page — HTTP cursor idiom + 100 k EXPLAIN gate + p95): built, verified live; **Sprint 8 complete**
+## 2026-07-19 (latest) — Sprint 9 **part A** (verification hardening, in-suite half: proptest suites for the four invariants + generated per-table RLS audit + `cargo deny` gate): built, verified live; fuzzing + chaos drills (part B) deferred
+
+Sprint 9 is the stability-grade verification layer (OPN-CORE.md §15). It splits cleanly on a
+**delivery-mechanism seam**, not a primitive seam: **(A)** everything that lives *inside* `cargo test`
+and CI config — the four property-test suites (roadmap item 1), the generated per-table RLS audit
+(item 4), and the `cargo deny` licenses/advisories gate (item 5); **(B)** the *out-of-band harnesses*
+that need a separate toolchain or a running stack — `cargo-fuzz` targets (item 2, nightly Rust +
+its own crate) and the chaos drill scripts (item 3, kill-9 / restart orchestration against the compose
+stack + a loadgen verifier). Part A is the generative + audit net that then runs forever in CI; part B
+is the crash/fuzz surface. No roadmap amendment — this is items 1/4/5 verbatim.
+
+### What exists now
+
+- **`crates/core/tests/prop_fsm.rs`** (7 properties, pure — full `proptest!` shrinking, no DB). Over the
+  calls FSM (`calls::fsm::apply`) and the hold FSM (`ledger::fsm::apply`): totality (never panics on any
+  generated `session × actor × others × action`), terminal absorption (`Ended`/`Captured`/`Released`
+  reject everything), **legality vs an independently-encoded predicate** (the legal set written once as a
+  predicate, NOT by calling `apply` — that would mirror the impl and prove nothing), result-state
+  legality, the session-end rule (Decline/Hangup end iff no other party stays active), and hold stream
+  absorption from `Held`.
+- **`crates/core/tests/prop_cursor.rs`** (3 properties). Microsecond-exact encode→decode round-trip;
+  arbitrary strings and arbitrary bytes decode to `Ok` or `Fail::Code(Invalid)` and **never panic** (the
+  §15 fuzz-target property, proven generatively here too).
+- **`crates/core/tests/prop_ledger.rs`** (2 tests, real Postgres). Generated op sequences
+  (`Transfer|Hold|Capture|Release`, indices/amounts from small pools, hold refs resolved at runtime).
+  *Sequential* asserts all four ledger invariants after each sequence — per-account
+  `balance == Σ transfers` via the **same `store::reconcile` SQL prod freezes on** (no drift), `Σ balances
+  == 0`, no negative wallet, `available ≥ 0` per wallet. *Concurrent* splits transfers across 8 tasks and
+  asserts only the global invariants — the deadlock-free `FOR UPDATE … ORDER BY id` order under
+  contention (zero `Fail::Internal`), generalizing the Sprint 7 concurrency battery.
+- **`crates/core/tests/prop_channels.rs`** (2 tests, real Postgres). Generated send streams whose
+  client_uuids collide (drawn from a 6-slot pool). *Sequential*: repeat uuids dedupe to an identical
+  `(message_id, seq)` ack, first sends don't; seq is a gapless `1..=distinct`; `last_seq == distinct ==
+  count(*)`. *Concurrent*: one task per send — the channel row lock must keep dedup consistent and seq
+  gapless under races.
+- **`crates/core/tests/rls_audit.rs`** (generated, catalog-driven). Enumerates every `public` table with a
+  live `world_id` column straight from `pg_class`/`pg_attribute` (partition *children* excluded — the
+  partitioned parent `messages` governs), and asserts each ENABLEs + FORCEs RLS and carries a
+  `world_id`-referencing policy. **28 world-scoped tables** covered. A `tenants`-shaped documented
+  `INFRA_EXCEPTIONS` allowlist (world_id column, but GRANT-guarded infra row, not RLS — roadmap Sprint 1),
+  self-checked against staleness; plus a floor-count guard so a broken enumeration can't pass vacuously.
+- **`opn-core/deny.toml`** + a **`cargo-deny` CI job** (`.github/workflows/ci.yml`): advisories (+ yanked)
+  and an SPDX license allow-list, source-registry lockdown, duplicate-version warn. `proptest = "1"` added
+  to core dev-deps.
+
+### Decisions closed during implementation (roadmap deviations, all ponytail)
+
+1. **proptest as a *generator* inside the async `#[sqlx::test]`, not the sync `proptest!` runner, for the
+   DB-backed suites.** `strategy.new_tree(&mut runner).current()` yields a value; the async test executes
+   it with plain `.await` against one pool — no runtime-nesting hack (`Handle::block_on` inside a runtime
+   panics). Cost: no automatic shrinking. Bought back with `TestRunner::deterministic()` (a red CI
+   reproduces byte-for-byte) and print-the-whole-sequence-on-fail. The roadmap already makes manual
+   minimization the intended path ("the generative layer finds, the deterministic layer remembers"), so
+   the trade is free. The *pure* FSM/cursor suites have no DB and DO use the full `proptest!` macro with
+   shrinking. Marked `ponytail:` — add async-shrinking machinery only if a real failure ever resists
+   hand-minimization.
+2. **Fresh RLS-isolated world per proptest case, no inter-case cleanup.** Every invariant query runs in
+   `world_tx(case_world)`, so cases sharing one `#[sqlx::test]` database cannot contaminate each other —
+   RLS is the isolation the test relies on, tested by relying on it.
+3. **The RLS audit is a catalog *mechanism* proof, not per-table behavioral seeding.** It asserts
+   ENABLE+FORCE+world_id-policy for every world_id table — exactly the exit criterion's "diffing
+   `information_schema`", non-vacuous (a new table that forgets RLS fails), and generic (no per-table
+   fixture). The *behavioral* two-world proof stays where it already is: `rls_canary` + each primitive's
+   own cross-world test. The generated audit is the coverage net over them.
+4. **Concurrent ledger variant is transfer-only.** Holds/captures don't parallelize meaningfully without
+   shared runtime state to track live hold ids; the sequential variant already carries the full
+   hold/capture/release FSM interplay. This is exactly the roadmap's "split the sequence across 8 tasks,
+   assert only the global invariants."
+
+### The keepers this session (the point of rule 4): both generative layers caught something on run one
+
+- **The ledger proptest failed on case 0 — and the bug was in the *test*, which is itself the signal.** My
+  `available ≥ 0` invariant flagged the **system account's** by-design negative balance (it is the mint;
+  `CHECK (balance >= 0 OR owner_kind = 'system')` explicitly lets it go negative). An imprecise invariant
+  is a real defect — a too-strict property gives false confidence when it's *right* and noise when it's
+  *wrong*. Fixed by scoping the wallet checks to `owner_kind = 'character'`. Conservation (`reconcile`
+  clean + `Σ = 0`) passed untouched — the money code is correct; my statement of the invariant wasn't.
+- **The RLS audit surfaced `tenants` on run one — the single world_id table that is *deliberately* not
+  RLS-protected.** That is the audit doing its job: it found the exact exception to the rule and forced it
+  to be encoded explicitly and documented (GRANT-guarded infra row, roadmap Sprint 1), instead of a
+  hand-written canary silently never covering it. A blanket "every world_id table forces RLS" would have
+  been *wrong*; the catalog made the exception visible and named.
+
+### Verification (rule 4)
+
+- `cargo fmt --check` clean; `cargo clippy --all-targets -- -D warnings` clean (fixed on the way:
+  `doc_lazy_continuation` on the numbered-list doc comments, one redundant `prelude` import, one dead
+  struct field — the `unwrap_used` deny respected, `.expect`/`prop_assert!` only).
+- **15 new tests green against the live stack** (Postgres+Redis+MinIO): 7 (`prop_fsm`) + 3 (`prop_cursor`)
+  + 2 (`prop_ledger`) + 2 (`prop_channels`) + 1 (`rls_audit`). Robust at `PROPTEST_CASES=200` (ledger
+  seq ~11 s, channels seq ~4 s). RLS audit reports 28 world-scoped tables all FORCE RLS.
+- **`cargo deny` not run locally** (not installed; a heavy `cargo install`). `deny.toml` + `ci.yml` parse;
+  the license allow-list is a best-effort SPDX set — **the first CI run may need one or two additions**
+  once it sees the real tree. Flagged for the operator; the gate is designed to be tuned on first sight.
+
+### Exit criteria status (Sprint 9 — partial; part-A items only)
+
+| Criterion (roadmap Sprint 9) | Status |
+|---|---|
+| All four proptest suites green at 1024 cases locally | **PARTIAL** — all four suites exist and are green at 200 cases; the 1024-case local burn-in is a dedicated run (env `PROPTEST_CASES=1024`), do it alongside the part-B nightly wiring. |
+| 24 h fuzz per target, zero crashes | **OPEN (part B)** — `cargo-fuzz` targets not built yet. |
+| `just chaos` green three consecutive runs; weekly CI | **OPEN (part B)** — chaos scripts not built yet. |
+| Generated RLS test covers every world_id table | **CLOSED** — `rls_audit.rs` enumerates from the catalog (28 tables), FORCE-RLS + policy asserted, `tenants` the one documented exception; floor-count + stale-allowlist guards keep it honest. |
+| Dependency audit gate (`cargo deny`) | **CLOSED (pending first-CI tune)** — `deny.toml` + CI job landed; local run skipped, allow-list may need one pass. |
+
+### Reflection
+
+- **The mechanism seam was the right cut.** Part A is entirely `cargo test` + CI YAML — nothing needs
+  nightly Rust or a choreographed crash. It reused every existing harness idiom (`app_pool`,
+  `seed_world_tenant`, `world_tx`, `mint_session`, the ledger `reconcile`/`fund` helpers) so the four
+  suites are strategy + invariant, no new machinery. Part B is a genuinely different kind of work (a fuzz
+  crate, kill-9 orchestration) and belongs in its own session.
+- **Generative testing paid for itself before it found a code bug.** Both new generated layers caught
+  something on their first run — an over-tight invariant and an un-encoded RLS exception. Neither was a
+  production defect; both were *gaps in how correctness was stated*, which is exactly what the §15
+  hardening budget is meant to surface. The confidence half of ADR-1: the money and RLS code came back
+  clean under generated adversarial sequences, and the fixes were all in the tests.
+- **The two easy, independent chunks (pure FSM/cursor proptests; the `cargo deny` config) were delegated
+  to parallel subagents** while the DB-backed proptests + the RLS audit — the parts needing the schema and
+  harness in-head — were done on the main thread. Clean division: the shared `Cargo.toml`/`ci.yml` edits
+  stayed on one owner to avoid races.
+
+### Not committed / next session
+
+- **Sprint 9 part A is complete and green but untracked** on top of committed 0–8. First commit lands the
+  five new `tests/*.rs`, `deny.toml`, the `cargo-deny` CI job, and the `proptest` dev-dep. Drift gate
+  untouched (no contracts change — verification adds no wire types).
+- **Next: Sprint 9 part B — the out-of-band harnesses.** `cargo-fuzz` targets (`fuzz_client_frame` over
+  `ClientFrame` parse + the validation layer, `fuzz_link_hello`, `fuzz_cursor_decode`; corpus committed,
+  5 min/target nightly, `just fuzz` local); the four chaos scripts (`kill9-mid-send`, `pg-restart`,
+  `redis-restart`, `link-drop`) each asserting their invariant by exit code, `just chaos`, weekly CI job;
+  wire the nightly proptest run at `PROPTEST_CASES=256` and do the one-time 1024-case local burn-in.
+- Minor/none-blocking: `cargo deny` license allow-list wants a first-CI pass; the concurrent proptest case
+  counts are deliberately capped (4/6) to bound wall-clock — the sequential suites carry the case-count
+  scaling via `PROPTEST_CASES`.
+
+---
+
+## 2026-07-19 (Sprint 8B) — Sprint 8 **part B** (feed read surface: home fan-out-on-read, profile, post detail + comments, hashtag page — HTTP cursor idiom + 100 k EXPLAIN gate + p95): built, verified live; **Sprint 8 complete**
 
 Sprint 8 split on the write-plane/read-plane seam (part A did the writes on part A's committed schema).
 Part B is the **read plane**: the four HTTP timelines the "fan-out-on-read" headline names, plus the two

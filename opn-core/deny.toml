@@ -1,0 +1,59 @@
+# cargo-deny supply-chain gate (Sprint 9).
+#
+# Gates the dependency tree on two things:
+#   - security advisories (RustSec DB) + yanked crates  -> `cargo deny check advisories`
+#   - license policy (SPDX allow-list)                   -> `cargo deny check licenses`
+# Also checks source registries (crates.io + explicit git only) and warns on
+# duplicate crate versions. Runs in CI (see .github/workflows/ci.yml, the
+# `cargo-deny` job) via `cargo deny check`.
+#
+# Schema: targets cargo-deny 0.16+ (verified against the 0.18 config docs).
+# The current schema dropped the old per-severity toggles: `[advisories]` no
+# longer takes `vulnerability`/`notice`/`severity-threshold` (all now hard
+# errors from the advisory DB), and `[licenses]` no longer takes
+# `copyleft`/`default`/`allow-osi-fsf-free` (replaced by the SPDX `allow` list).
+# The `version` key is deprecated/no-op in this schema, so it's intentionally
+# omitted. An unknown key hard-errors, so this stays to the well-established set.
+
+[advisories]
+# Vulnerabilities and unmaintained/unsound advisories error by default (advisory
+# DB behavior). Yanked crates are treated as hard errors too.
+yanked = "deny"
+# Specific advisory IDs get added here, each with a one-line justification, only
+# after being triaged (e.g. "RUSTSEC-XXXX-XXXX # not reachable, no fix yet").
+ignore = []
+
+[licenses]
+# Permissive licenses actually present in this tree. Anything outside this list
+# fails the check and must be reviewed before being added.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+    "Unlicense",
+    "OpenSSL",
+]
+confidence-threshold = 0.9
+
+[licenses.private]
+# The workspace's own crates are `license = "UNLICENSED"` with `publish = false`;
+# don't run the license check against them.
+ignore = true
+
+[bans]
+# A private application tree legitimately carries duplicate transitive versions;
+# surface them as a warning rather than blocking CI.
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
