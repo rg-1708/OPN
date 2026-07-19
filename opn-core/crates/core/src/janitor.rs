@@ -31,6 +31,7 @@ pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
             run_task("media_verify", media_verify(&state)).await;
             run_task("listings_expire", listings_expire(&state.pg)).await;
             run_task("calls_reap", calls_reap(&state)).await;
+            run_task("calls_reap_orphaned", calls_reap_orphaned(&state)).await;
             // In-process, no DB: buckets idle > 10 min go away (§12).
             run_task("ratelimit_sweep", async { Ok(state.limits.sweep_idle()) }).await;
         }
@@ -134,11 +135,11 @@ async fn media_verify(state: &AppState) -> Result<u64> {
     Ok(total)
 }
 
-/// Reaps zombie call rings across every world (§10.4): non-ended sessions older
-/// than 60 s with no joined participant are force-ended, and a final
-/// `calls.state` is published so any live subscriber converges. Per-world walk
-/// (it publishes events after the SQL), like the media sweeps. Part B extends
-/// this to also emit a tenant-link `clear` for each reaped call.
+/// Reaps zombie call rings across every world (§10.4): un-accepted `ringing`
+/// sessions older than 60 s are force-ended, and a final `calls.state` is
+/// published so any live subscriber converges — plus a tenant-link `clear` (§5),
+/// since a reaped session ends (`publish_snapshot` emits both). Per-world walk
+/// (it publishes events after the SQL), like the media sweeps.
 async fn calls_reap(state: &AppState) -> Result<u64> {
     let world_ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM worlds")
         .fetch_all(&state.pg)
@@ -147,8 +148,43 @@ async fn calls_reap(state: &AppState) -> Result<u64> {
     for world_id in world_ids {
         let snaps = crate::primitives::calls::store::reap_zombie_rings(&state.pg, world_id).await?;
         for snap in &snaps {
-            let evt = crate::primitives::calls::snapshot_evt(snap);
-            crate::gateway::publish(state, world_id, &format!("call:{}", snap.call_id), &evt).await;
+            crate::primitives::calls::publish_snapshot(state, world_id, snap).await;
+        }
+        total += snaps.len() as u64;
+    }
+    Ok(total)
+}
+
+/// Reaps orphaned *active* calls across every world (§10.4, §5): an active
+/// session whose joined participants have all gone offline (no live WS
+/// connection) — a double crash where neither party sent `hangup`, so no FSM
+/// transition ever ends it. The registry (in-process presence) is the liveness
+/// signal SQL can't see, so this bridges: the store yields active candidates +
+/// their joined characters, we drop any with a still-online participant, and end
+/// the rest through `publish_snapshot` (final `calls.state` + tenant-link
+/// `clear`). Age-gated in the store so a fresh call is spared.
+async fn calls_reap_orphaned(state: &AppState) -> Result<u64> {
+    let world_ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM worlds")
+        .fetch_all(&state.pg)
+        .await?;
+    let mut total = 0u64;
+    for world_id in world_ids {
+        let candidates =
+            crate::primitives::calls::store::active_reap_candidates(&state.pg, world_id).await?;
+        // Orphan = no joined participant is still online on this replica.
+        let dead: Vec<Uuid> = candidates
+            .into_iter()
+            .filter(|(_, chars)| {
+                chars
+                    .iter()
+                    .all(|c| !state.registry.is_character_online(world_id, *c))
+            })
+            .map(|(id, _)| id)
+            .collect();
+        let snaps =
+            crate::primitives::calls::store::end_active_orphans(&state.pg, world_id, &dead).await?;
+        for snap in &snaps {
+            crate::primitives::calls::publish_snapshot(state, world_id, snap).await;
         }
         total += snaps.len() as u64;
     }

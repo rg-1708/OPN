@@ -495,6 +495,16 @@ row, so every real ring keeps a joined participant and would be skipped, letting
 an unanswered ring linger forever and pin both parties busy. A ring only leaves
 `ringing` via accept, so keying the reap on `ringing` + age reaps exactly the
 un-accepted ones and never an `active` call. See reflections 2026-07-18, Sprint 6.)*
+An **active** session all of whose joined participants have gone offline (no live
+WS connection) and is older than 60 s is likewise reaped — its voice targets are
+bound to characters no longer present. Without this, a call both parties drop
+without an explicit `hangup` (a double crash) stays `active` forever: no FSM
+transition fires (a WS disconnect deliberately does not transition a participant
+row, §5), so the tenant link never receives its `clear` and `/calls/active`
+keeps re-syncing the dead call. The reaper routes through the same
+`calls.state` + link `clear` emit as a hangup. *(Added 2026-07-18, build, Sprint 6
+part B: the ringing net had no active-call equivalent; the tenant-link voice
+lifecycle made the leak observable. See reflections 2026-07-18, Sprint 6 part B.)*
 
 ### 10.5 ledger
 

@@ -28,5 +28,9 @@ fn main() {
     contracts::ContactItem::export_all_to(dir).expect("export ContactItem");
     contracts::ResolveResult::export_all_to(dir).expect("export ResolveResult");
     contracts::ListingItem::export_all_to(dir).expect("export ListingItem");
+    // tenant link (§5): the hello handshake frame and the /calls/active re-sync
+    // row — neither rides the Cmd/Evt graph (VoiceAction does, via calls.voice).
+    contracts::LinkHello::export_all_to(dir).expect("export LinkHello");
+    contracts::ActiveCall::export_all_to(dir).expect("export ActiveCall");
     println!("bindings written to {dir}");
 }

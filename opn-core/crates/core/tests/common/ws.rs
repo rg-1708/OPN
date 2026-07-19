@@ -113,6 +113,40 @@ pub async fn connect(addr: SocketAddr) -> TestClient {
     }
 }
 
+/// Connect to `ws://addr/link` with the tenant API key header — the tenant link
+/// (§5). No hello sent; the caller drives the handshake. Returns `Err` if the
+/// upgrade is rejected (e.g. a bad API key → 401).
+pub async fn connect_link(
+    addr: SocketAddr,
+    api_key: &str,
+) -> Result<TestClient, tokio_tungstenite::tungstenite::Error> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut req = format!("ws://{addr}/link")
+        .into_client_request()
+        .expect("link request");
+    req.headers_mut().insert(
+        "authorization",
+        format!("Bearer {api_key}").parse().expect("auth header"),
+    );
+    let (ws, _) = connect_async(req).await?;
+    Ok(TestClient {
+        ws,
+        next_id: 1,
+        pushes: std::collections::VecDeque::new(),
+    })
+}
+
+/// Connect the link and complete the hello handshake, asserting the ack is `ok`.
+pub async fn connect_link_hello(addr: SocketAddr, api_key: &str) -> TestClient {
+    let mut link = connect_link(addr, api_key).await.expect("link connect");
+    let hello = json!({ "resource_version": "test", "contracts_version": "test" }).to_string();
+    link.send_raw(&hello).await;
+    let ack = link.recv_ack(Duration::from_secs(5)).await;
+    assert_eq!(ack["ok"], json!(true), "link hello ack not ok: {ack}");
+    assert_eq!(ack["reply_to"], json!(0), "link hello ack reply_to: {ack}");
+    link
+}
+
 /// Connect and complete the auth handshake, asserting the ack is `ok`.
 pub async fn connect_and_auth(addr: SocketAddr, token: &str) -> TestClient {
     let mut client = connect(addr).await;

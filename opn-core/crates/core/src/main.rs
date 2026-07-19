@@ -68,6 +68,7 @@ async fn main() {
         pg,
         redis,
         registry: Arc::new(opn_core::gateway::registry::SessionRegistry::default()),
+        links: Arc::new(opn_core::gateway::link::LinkRegistry::default()),
         limits: Arc::new(opn_core::infra::ratelimit::RateLimitTable::default()),
         preauth: Arc::new(opn_core::gateway::ws::PreauthCaps::default()),
         tenants: Arc::new(opn_core::infra::tenant_cache::TenantCache::default()),

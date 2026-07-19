@@ -91,6 +91,9 @@ fn every_evt_names_its_covering_test() {
             Evt::ChannelsResumeOverflow { .. } => "channels_members_resume::resume_overflow_at_cap",
             Evt::CallsState { .. } => "calls::full_lifecycle_start_accept_signal_hangup",
             Evt::CallsSignal { .. } => "calls::signal_relay_and_authz",
+            Evt::CallsVoice { .. } => {
+                "link::set_targets_on_accept_and_clear_on_hangup, link::reap_emits_clear"
+            }
         }
     }
     let _ = covering_test;

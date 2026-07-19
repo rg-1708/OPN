@@ -6,6 +6,178 @@ to OPN-CORE.md as CDRs — this file records *how the build actually went*.
 
 ---
 
+## 2026-07-18 (latest) — Sprint 6 **part B** (tenant link: `/link` gateway, `calls.voice` down-events, `/calls/active` re-sync, coturn + `ice_servers`): built, verified live; **Sprint 6 complete**
+
+Part A shipped the WS-facing call primitive and stopped on the shared-nothing seam
+(A = call sessions + gateway, B = the tenant `/link`). Part B lands the other half:
+the server→FXServer push channel that carries voice-target events. A and B share no
+tables and only the `calls` emit sites, so B started clean on the committed 0–6A base.
+With it **Sprint 6 is complete** — every exit criterion passes.
+
+### What exists now
+
+- **`gateway/link.rs`** (new) — the whole link connection type: `LinkRegistry`
+  (world → live link), `LinkHandle` (bounded queue + `link_seq` takeover guard,
+  mirroring `ConnHandle`'s `conn_seq` subtlety), the `GET /link` axum handler
+  (API-key via the `TenantAuth` extractor, no origin/pre-auth — a native FXServer,
+  not a browser), the hello handshake (`LinkHello` within 3 s → ack → register →
+  writer/reader), last-writer takeover (prev closed 4408), durable backpressure
+  (queue full → close 4410 → resource reconnects + re-syncs), and heartbeat
+  (2 missed pongs → reap a crashed FXServer). Up-direction is nothing: the reader
+  only tracks pongs/close and ignores stray frames.
+- **Voice emit** — `calls::publish_snapshot` (now pub) does the `call:<id>` snapshot
+  fan-out **and** `emit_voice` on the link in lockstep: `set_targets` with the joined
+  characters while a call is active, `clear` when it ends, nothing while ringing.
+  Wired into accept/decline/hangup (via `publish_snapshot`) **and** the janitor reap
+  (which now routes through `publish_snapshot` too, so a reaped ring clears voice for
+  free).
+- **Re-sync** — `GET /v1/tenants/self/calls/active` (`store::active_calls`,
+  world-scoped) returns every non-ended session + participants so a reconnecting
+  resource rebuilds targets. `ActiveCall` contract type.
+- **ICE** — `OPN_ICE_SERVERS` (JSON, default `[]`) parsed once into `Config`, echoed
+  into **every** `calls.state` snapshot (§5). coturn added to the dev compose
+  (host-net for the relay UDP range); README/`.env.example` document the STUN/TURN
+  wiring. Video bytes go P2P/relay, never Core.
+- **Contracts** — `Evt::CallsVoice` (Durable), `ice_servers` on `Evt::CallsState`,
+  `VoiceAction`/`LinkHello`/`ActiveCall` types. Bindings regenerated (3 new `.ts`
+  + updated `Evt`/`ServerMsg`), coverage match-test + golden wire tests extended
+  (`push_calls_voice`, `push_calls_state` +ice_servers, `link_hello_shape`).
+
+### Decisions closed during implementation (roadmap deviations, all ponytail)
+
+1. **Link registry keyed by `world_id`, not `TenantId`** (roadmap said
+   `DashMap<TenantId>`). A voice target is world-scoped and every call transition
+   already holds `world_id`, so world-keying removes a world→tenant lookup from the
+   call hot path. It relies on **one tenant per world** — which I made real at the
+   creation site: `admin create-tenant --world <existing>` now refuses a world that
+   already has a tenant (the adversarial review's keeper #2). Multi-tenant hosting
+   (§17) must re-key by tenant before lifting the invariant; marked in the module doc.
+2. **Hello ack reuses `ServerMsg::Ack { reply_to: 0, ok: true }`** — the design says
+   "same envelope as the client protocol." Gives the resource (and tests) an
+   observable "link live" signal without inventing an off-contract frame.
+3. **`is_broken_combo` is a hardcoded-`false` seam.** The design's known-broken-combo
+   list is empty at v1; wiring an env list that is always empty is pure YAGNI. The
+   hello field + the `INCOMPATIBLE` (4409) close path are the seam; a real list slots
+   in without a protocol change. `ponytail:` marked.
+4. **Link `send` is local-only** (single-replica, §9). The registry is in-process;
+   cross-replica link routing rides the same future as the rest of `replicas > 1`.
+   Documented at the top of `link.rs`.
+5. **Distinct link close codes** (4400 bad-hello / 4408 taken-over / 4409 incompatible
+   / 4410 slow-consumer). 4409 is the client protocol's slow-consumer code, but the
+   roadmap pins 4409 to *incompatible* on the link, so link slow-consumer is 4410 —
+   no operator confuses a version reject with a full queue.
+
+### The keeper this session (the point of rule 4): a MED leak found by the test-gap lens, missed by 9 green tests
+
+The adversarial workflow (4 lenses — correctness / protocol / security / test-gap —
+each finding then skeptically verified; **4 confirmed / 12 raw, 8 refuted**) landed
+its keeper on the **independent test-author leg** again, fifth sprint running:
+
+> An **active** call whose participants both drop their sockets *without* an explicit
+> `hangup` never reaches `Ended`. A WS disconnect deliberately does not transition a
+> participant row (the same fact the part-A reap keeper turned on), and the only
+> reaper is `ringing`-only — so no FSM transition ever fires. The link never receives
+> its matching `clear`: voice stays bound to characters no longer present, **and**
+> `/calls/active` keeps re-syncing the dead call so a reconnecting FXServer re-binds
+> it. The ringing state has a 60 s net; active had none.
+
+The part-A reap keeper was "a ring the reap could never fire on"; this is its exact
+mirror one state over — an **active** call the ring reap was never meant to touch,
+with no equivalent net. Part B made a part-A-latent leak *observable* (the voice
+lifecycle is what surfaces it). Fix (design-doc-first, §10.4 amended the same day):
+a second janitor task `calls_reap_orphaned` ends active sessions whose joined
+participants are **all offline** (the registry is the liveness signal SQL can't see,
+so the janitor bridges: store yields candidates + joined chars, the task drops any
+with a still-online participant, `end_active_orphans` ends the rest) and routes the
+end through `publish_snapshot` — so the link `clear` and the truthful `/calls/active`
+both fall out for free. Age-gated 60 s so a call mid-setup is spared; the
+`AND state = 'active'` update guard makes it idempotent against a concurrent hangup.
+The un-tested-until-now double-crash path is now `orphaned_active_call_reaped_emits_clear`
+(drops both real sockets, waits for offline, ages, reaps, asserts `clear`).
+
+The rejected alternative — "tie participant `left` to WS disconnect" — is wrong: a
+mobile client reconnects (takeover) on every network blip, so disconnect≠left would
+end a call on every reconnect. Call state must stay independent of socket lifecycle
+(the design's own "link down = calls still connect"); a liveness-gated janitor sweep
+is the right shape.
+
+### Also fixed / documented from the review
+
+- **LOW, fixed** — coverage ledger named a nonexistent test for `CallsVoice`
+  (`set_targets_on_accept_clear_on_hangup`, missing the `_and_`). The match-arm
+  strings are unused, so the compiler never caught the drift — exactly the "a test
+  you didn't write is a lie" the ledger exists to prevent. Corrected. (This is the
+  discipline-not-compiler-enforced drift the Sprint-5B addendum warned about, biting
+  again — same class as the lapsed goldens/canary.)
+- **LOW, fixed at source** — the world-key eviction (#2 above): the `admin` guard
+  enforces one-tenant-per-world where tenants are born, so the world-keyed link can't
+  be silently taken over by a second tenant. No schema `UNIQUE` (that would
+  over-constrain the multi-tenant-hosting future the design leaves open).
+- **LOW, documented as accepted ceiling** — `/link` has no pre-auth socket cap
+  (unlike `/ws`). But `/ws` upgrades *before* auth, so its caps bound anonymous
+  sockets; `/link` authenticates *before* upgrade (`TenantAuth` → 401 pre-upgrade),
+  so the anonymous flood those caps prevent can't happen. The residual (a valid or
+  leaked key opening many pre-hello sockets) is a credentialed abuse that per-IP caps
+  would not reliably stop — a defensible tradeoff, documented in the module.
+- **Refuted, correctly** — a reviewer claimed `emit_voice` (post-commit, outside the
+  session lock) could deliver `set_targets` after `clear` under concurrency. The
+  verifier traced it out: single-replica `gateway::publish` reaches no `await`
+  (the `replicas > 1` branch is dead), so there is no yield between the lock-releasing
+  commit and the link `try_send`, and the `FOR UPDATE` serializes commits per call —
+  emit order matches commit order. Real only under `replicas > 1`, which the link is
+  already documented not to support.
+
+### Verification (rule 4)
+
+- `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` clean (the `core`
+  crate's `unwrap_used` deny respected — `?`/`.expect`/`unwrap_or_else`/`assert!` only).
+- **Full workspace suite green** against the live stack (Postgres+Redis+MinIO): 29
+  binaries, 0 failures. New `tests/link.rs` (9): the two-client + real-link lifecycle
+  (accept→set_targets→partial-hangup→shrunk targets→clear), takeover (old link 4408 +
+  successor still receives), link-down drop (call still connects), `/calls/active`
+  re-sync reflecting live state, the orphan-reap keeper, decline-emits-no-voice,
+  bad-hello 4400, bad-key rejection. Plus 3 `link.rs` unit tests (backpressure close,
+  takeover seq-guard, connected-world-only send) and 3 golden wire tests. Adversarial
+  workflow: 16 agents, 4 confirmed findings all resolved (2 fixed in code, 1 fixed at
+  source, 1 documented).
+
+### Exit criteria status (Sprint 6 — now fully closed)
+
+| Criterion | Status |
+|---|---|
+| Scripted two-client + link demo: call connects, link `set_targets`, hangup clears | **PASS** — `set_targets_on_accept_and_clear_on_hangup` drives two real client sockets + a real `/link` (not a fake link half). |
+| FSM pure function with 100 % transition-table coverage | **PASS** (part A). |
+| All `calls.*` in coverage test; `/link` + re-sync in route test | **PASS** — `calls.voice` in the Evt match-test; `/link` and `/v1/tenants/self/calls/active` both hit against the real `app_router` in `tests/link.rs` (rule 3). |
+
+### Reflection
+
+- **The seam-split paid a fifth time.** Part A / part B shared no tables, so B was a
+  clean, fully-reviewed slice on the committed base — same dividend Sprints 4/5 paid.
+- **The independent test leg caught a shipped defect for the fifth straight sprint**,
+  and it was the *mirror* of part A's keeper (WS-disconnect-doesn't-transition-a-row,
+  one call-state over). Same root fact, second consequence — exactly why the budgeted
+  adversarial pass (ADR-1) is work, not polish: the desk-check that "active only ends
+  on hangup" reads fine until you trace the double-crash.
+- **Design-doc-first held again.** §10.4 had no active-call GC policy; I amended the
+  design (dated) before trusting the reaper, per the standing rule.
+- **The unused-string coverage ledger drifted again** (part B's `CallsVoice` arm) —
+  the same discipline-not-compiler gap the Sprint-5B addendum flagged. Worth a
+  compiler-shaped fix eventually (assert the named tests exist); logged, not built.
+
+### Not committed / next session
+
+- **Sprint 6 (A+B) is complete and green but this B slice is untracked** on top of the
+  committed 0–6A. First commit re-arms the drift gate (3 new binding files + updated
+  Evt/ServerMsg) — the operator's call.
+- **Sprint 7 — Ledger + exchange.** Depends only on Sprint 3 (gateway + notify), so it
+  is unblocked and parallelizable; the transfer/hold FSM + nightly reconciliation is
+  the next primitive.
+- Still open, minor, none blocking: the deferred `calls.state` monotonic `version`
+  (snapshot-vs-live reorder residual), online-member badging, `identity.me`
+  own-last-seen, Bearer case-sensitivity.
+
+---
+
 ## 2026-07-18 (later) — Sprint 6 **part A** (calls: schema, FSM-as-data, start/accept/decline/hangup/signal, snapshot-on-sub, ring-via-notify, zombie reap): built, verified live; tenant link (part B) deferred
 
 Same seam-split as every sprint since 4: Sprint 6 has two shared-nothing halves —

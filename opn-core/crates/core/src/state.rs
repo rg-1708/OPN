@@ -3,6 +3,7 @@ use std::sync::Arc;
 use sqlx::PgPool;
 
 use crate::config::Config;
+use crate::gateway::link::LinkRegistry;
 use crate::gateway::registry::SessionRegistry;
 use crate::gateway::ws::PreauthCaps;
 use crate::infra::ratelimit::RateLimitTable;
@@ -14,6 +15,9 @@ pub struct AppState {
     pub pg: PgPool,
     pub redis: redis::aio::ConnectionManager,
     pub registry: Arc<SessionRegistry>,
+    /// Per-world tenant-link connections (§5): the down-only voice-target channel
+    /// to each FXServer gateway resource.
+    pub links: Arc<LinkRegistry>,
     pub limits: Arc<RateLimitTable>,
     pub preauth: Arc<PreauthCaps>,
     pub tenants: Arc<TenantCache>,

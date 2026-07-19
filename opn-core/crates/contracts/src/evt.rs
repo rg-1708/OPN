@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use uuid::Uuid;
 
-use crate::types::{CallKind, CallParticipant, CallSessionState, NotifyClass, ReceiptKind};
+use crate::types::{
+    CallKind, CallParticipant, CallSessionState, NotifyClass, ReceiptKind, VoiceAction,
+};
 
 /// Every server→client pushed event. Same tagging idiom as `Cmd`.
 ///
@@ -116,6 +118,12 @@ pub enum Evt {
         kind: CallKind,
         state: CallSessionState,
         participants: Vec<CallParticipant>,
+        /// STUN/TURN servers for WebRTC (§5, §10.4): static config, echoed into
+        /// every snapshot so the client always has the current ICE config. `[]`
+        /// when no relay is configured. Shape: `[{ urls, username?, credential? }]`
+        /// (RTCIceServer). Added in Sprint 6 part B — additive over part A.
+        #[ts(type = "unknown")]
+        ice_servers: serde_json::Value,
     },
 
     /// Opaque WebRTC signaling relay on `call:<id>` (§10.4): offer/answer/ICE
@@ -129,6 +137,18 @@ pub enum Evt {
         to: Uuid,
         #[ts(type = "unknown")]
         payload: serde_json::Value,
+    },
+
+    /// Voice-target push on the tenant link (§5): Core tells the FXServer gateway
+    /// which characters' game-voice to bind for a call. Down-only, delivered on
+    /// the per-world link connection (never a client topic). Durable — a lost
+    /// target leaves voice unbound until the next transition, so close a link too
+    /// slow for it (it reconnects and re-syncs via `/calls/active`).
+    #[serde(rename = "calls.voice")]
+    CallsVoice {
+        call_id: Uuid,
+        action: VoiceAction,
+        characters: Vec<Uuid>,
     },
 }
 
@@ -175,6 +195,9 @@ impl Evt {
             // A dropped ICE candidate stalls setup — close rather than drop
             // (§10.4: signaling is durable, unlike the ephemeral garnish above).
             Evt::CallsSignal { .. } => EvtClass::Durable,
+            // A lost voice target leaves game-voice unbound; close the link (it
+            // re-syncs active calls on reconnect, §5).
+            Evt::CallsVoice { .. } => EvtClass::Durable,
         }
     }
 }

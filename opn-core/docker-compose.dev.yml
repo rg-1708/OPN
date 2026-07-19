@@ -53,6 +53,18 @@ services:
       mc mb -p local/opn
       "
 
+  # WebRTC STUN/TURN for video calls (§5, §10.4). Not Core code — Core only
+  # echoes the ice_servers config into calls.state (OPN_ICE_SERVERS). host
+  # networking so the TURN relay's UDP range works without per-port mapping;
+  # dev credentials are opn:opnsecret. Video bytes go P2P/relay, never Core.
+  coturn:
+    image: coturn/coturn
+    network_mode: host
+    command: >
+      -n --realm=opn --lt-cred-mech --user=opn:opnsecret
+      --no-tls --no-dtls --min-port=49160 --max-port=49200
+      --listening-port=3478
+
 volumes:
   pgdata:
   miniodata:

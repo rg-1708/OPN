@@ -56,4 +56,31 @@ Load tests connect from a single IP, so boot the server with
 `OPN_PREAUTH_PER_IP_MAX` raised above the connection count (default is 5) —
 otherwise the gateway 429s all but 5 of the connections.
 
+## Tenant link (voice targets)
+
+The FXServer gateway resource opens one WebSocket per world to
+`ws://<core>/link`, authenticated by the tenant **API key** in the
+`Authorization: Bearer <key>` header (a native client, not a browser — headers
+are fine). Its first frame is a hello:
+
+```json
+{ "resource_version": "1.2.3", "contracts_version": "0.1.0" }
+```
+
+Core acks `{ "reply_to": 0, "ok": true }`, logs the version pair, and then
+pushes **down-only** `calls.voice` events (`set_targets` on call accept, `clear`
+on end) — the resource binds/unbinds game-voice accordingly. Nothing flows up
+the link; all FXServer→Core calls are plain HTTPS with the API key. On
+(re)connect the resource re-syncs open calls:
+
+```sh
+curl localhost:8080/v1/tenants/self/calls/active -H "Authorization: Bearer <api key>"
+# -> [ { call_id, kind, state, participants: [...] }, ... ]
+```
+
+WebRTC ICE (STUN/TURN) is static config — Core only echoes `OPN_ICE_SERVERS`
+into every `calls.state` snapshot; video bytes go P2P or via coturn (the dev
+`coturn` compose service), never through Core. Set `OPN_ICE_SERVERS` (see
+`.env.example`) to point clients at your relay.
+
 See [../docs/OPN-CORE.md](../docs/OPN-CORE.md) for architecture and [../docs/opn-core-roadmap.md](../docs/opn-core-roadmap.md) for the roadmap.

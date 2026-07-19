@@ -11,7 +11,10 @@
 pub mod fsm;
 pub mod store;
 
-use contracts::{CallKind, ErrCode, Evt, NotifyClass};
+use contracts::{
+    ActiveCall, CallKind, CallParticipantState, CallSessionState, ErrCode, Evt, NotifyClass,
+    VoiceAction,
+};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -28,24 +31,59 @@ const NUMBER_MAX: usize = 32;
 const SIGNAL_MAX_BYTES: usize = 16 * 1024;
 
 /// Build the `calls.state` event from a snapshot — used by every emit path
-/// (handlers here and the janitor reap).
-pub fn snapshot_evt(snap: &CallSnapshot) -> Evt {
+/// (handlers here and the janitor reap). `ice_servers` is the static WebRTC ICE
+/// config echoed into every snapshot (§5).
+pub fn snapshot_evt(snap: &CallSnapshot, ice_servers: &serde_json::Value) -> Evt {
     Evt::CallsState {
         call_id: snap.call_id,
         kind: snap.kind,
         state: snap.state,
         participants: snap.participants.clone(),
+        ice_servers: ice_servers.clone(),
     }
 }
 
-async fn publish_snapshot(state: &AppState, world: Uuid, snap: &CallSnapshot) {
+/// Publish the full `calls.state` snapshot on `call:<id>` AND update the tenant
+/// link's voice targets (§5) — every state change routes through here so the two
+/// stay in lockstep. Pub so the janitor reap emits the same pair.
+pub async fn publish_snapshot(state: &AppState, world: Uuid, snap: &CallSnapshot) {
     crate::gateway::publish(
         state,
         world,
         &format!("call:{}", snap.call_id),
-        &snapshot_evt(snap),
+        &snapshot_evt(snap, &state.cfg.ice_servers),
     )
     .await;
+    emit_voice(state, world, snap);
+}
+
+/// Push the voice-target event to the tenant link (§5): `set_targets` with the
+/// joined characters while the call is active, `clear` when it ends. A ringing
+/// call has no targets yet. Best-effort local send — a disconnected link drops
+/// it and re-syncs on reconnect via `/calls/active`.
+fn emit_voice(state: &AppState, world: Uuid, snap: &CallSnapshot) {
+    let (action, characters) = match snap.state {
+        CallSessionState::Active => (VoiceAction::SetTargets, joined_characters(snap)),
+        CallSessionState::Ended => (VoiceAction::Clear, Vec::new()),
+        // A ring has no voice targets yet — nothing to set or clear.
+        CallSessionState::Ringing => return,
+    };
+    state.links.send(
+        world,
+        &Evt::CallsVoice {
+            call_id: snap.call_id,
+            action,
+            characters,
+        },
+    );
+}
+
+fn joined_characters(snap: &CallSnapshot) -> Vec<Uuid> {
+    snap.participants
+        .iter()
+        .filter(|p| p.state == CallParticipantState::Joined)
+        .map(|p| p.character_id)
+        .collect()
 }
 
 /// `calls.start` (§10.4): resolve → create a ringing session (caller joined,
@@ -179,5 +217,21 @@ pub async fn authorize_sub(state: &AppState, who: &Identity, call_id: Uuid) -> R
 /// *after* registration so a concurrent transition isn't lost.
 pub async fn snapshot(state: &AppState, who: &Identity, call_id: Uuid) -> Result<Evt, Fail> {
     let snap = store::snapshot(&state.pg, who.world_id, call_id).await?;
-    Ok(snapshot_evt(&snap))
+    Ok(snapshot_evt(&snap, &state.cfg.ice_servers))
+}
+
+/// `GET /v1/tenants/self/calls/active` (§5): the tenant link's re-sync — every
+/// non-ended session with its participants, so a reconnecting FXServer rebuilds
+/// voice targets. Bounded by concurrent calls (no cursor).
+pub async fn active_calls(state: &AppState, world: Uuid) -> Result<Vec<ActiveCall>, Fail> {
+    let snaps = store::active_calls(&state.pg, world).await?;
+    Ok(snaps
+        .into_iter()
+        .map(|s| ActiveCall {
+            call_id: s.call_id,
+            kind: s.kind,
+            state: s.state,
+            participants: s.participants,
+        })
+        .collect())
 }

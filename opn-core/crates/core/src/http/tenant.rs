@@ -9,7 +9,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::infra::auth::{api_key_hash, mint_jwt};
-use crate::primitives::{identity, Fail};
+use crate::primitives::{calls, identity, Fail};
 use crate::state::AppState;
 
 /// Authenticated tenant, extracted from `Authorization: Bearer opn_...`
@@ -137,4 +137,14 @@ pub async fn mint_session(
         device: minted.device,
     })
     .into_response()
+}
+
+/// `GET /v1/tenants/self/calls/active` (§5): the tenant link's re-sync feed —
+/// active call sessions + participants for the tenant's world, so a reconnecting
+/// FXServer rebuilds voice targets. API-key authed via `TenantAuth`.
+pub async fn active_calls(State(state): State<AppState>, tenant: TenantAuth) -> Response {
+    match calls::active_calls(&state, tenant.world_id).await {
+        Ok(list) => Json(list).into_response(),
+        Err(f) => fail_response(f),
+    }
 }

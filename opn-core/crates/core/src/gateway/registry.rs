@@ -344,7 +344,7 @@ impl SessionRegistry {
     }
 }
 
-fn serialize_push(topic: &str, evt: &Evt) -> Arc<str> {
+pub(crate) fn serialize_push(topic: &str, evt: &Evt) -> Arc<str> {
     let msg = ServerMsg::Push {
         topic: topic.to_string(),
         evt: evt.clone(),

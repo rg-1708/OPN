@@ -36,6 +36,11 @@ pub struct Config {
     /// WS ping interval; close after 2 missed pongs (§4.1). Configurable so
     /// the missed-pong test does not take a minute.
     pub heartbeat_secs: u64,
+    /// Static WebRTC ICE servers echoed into every `calls.state` snapshot (§5,
+    /// §10.4). A JSON array of `RTCIceServer` objects (`OPN_ICE_SERVERS`);
+    /// defaults to `[]` (P2P/STUN-less). Parsed once at startup — malformed JSON
+    /// aborts.
+    pub ice_servers: serde_json::Value,
 }
 
 fn req(name: &str) -> Result<String> {
@@ -87,6 +92,10 @@ impl Config {
             preauth_global_max: opt("OPN_PREAUTH_GLOBAL_MAX", 1000)?,
             preauth_per_ip_max: opt("OPN_PREAUTH_PER_IP_MAX", 5)?,
             heartbeat_secs: opt("OPN_HEARTBEAT_SECS", 30)?,
+            ice_servers: match std::env::var("OPN_ICE_SERVERS") {
+                Ok(v) => serde_json::from_str(&v).context("invalid JSON in OPN_ICE_SERVERS")?,
+                Err(_) => serde_json::json!([]),
+            },
         })
     }
 }

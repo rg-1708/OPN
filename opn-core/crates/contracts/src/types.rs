@@ -305,3 +305,39 @@ pub struct CallParticipant {
     pub character_id: Uuid,
     pub state: CallParticipantState,
 }
+
+// ── tenant link (OPN-CORE.md §5) ──────────────────────────────────────────────
+
+/// Voice-target action on the tenant link (§5, §10.4): `set_targets` names the
+/// characters whose game-voice Core wants bound for a call; `clear` tears them
+/// down when the call ends. Down-only (Core → FXServer), tenant-scoped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum VoiceAction {
+    SetTargets,
+    Clear,
+}
+
+/// Link hello (§5): the first frame the FXServer gateway resource sends after
+/// opening `wss://core/link`. Core logs the pair and refuses only known-broken
+/// combos — the field is the seam, enforcement slots in later without a protocol
+/// change (closes §17 Q4). Up-direction carries nothing else.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LinkHello {
+    pub resource_version: String,
+    pub contracts_version: String,
+}
+
+/// One active call in the `GET /v1/tenants/self/calls/active` re-sync (§5): the
+/// tenant link reads these on (re)connect to rebuild voice targets after a drop.
+/// Same shape as a `calls.state` snapshot minus the ICE config.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ActiveCall {
+    pub call_id: Uuid,
+    pub kind: CallKind,
+    pub state: CallSessionState,
+    pub participants: Vec<CallParticipant>,
+}

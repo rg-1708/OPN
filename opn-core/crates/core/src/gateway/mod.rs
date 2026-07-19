@@ -8,6 +8,7 @@ use crate::state::AppState;
 
 pub mod dispatch;
 pub mod fanout;
+pub mod link;
 pub mod presence;
 pub mod registry;
 pub mod topic;

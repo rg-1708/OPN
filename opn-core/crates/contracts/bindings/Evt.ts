@@ -4,6 +4,7 @@ import type { CallParticipant } from "./CallParticipant";
 import type { CallSessionState } from "./CallSessionState";
 import type { NotifyClass } from "./NotifyClass";
 import type { ReceiptKind } from "./ReceiptKind";
+import type { VoiceAction } from "./VoiceAction";
 
 /**
  * Every server→client pushed event. Same tagging idiom as `Cmd`.
@@ -24,4 +25,11 @@ at: string, } } | { "evt": "notify.event", "payload": { app_id: string, kind: st
 /**
  * RFC 3339 server timestamp.
  */
-at: string, } } | { "evt": "channels.typing", "payload": { channel_id: string, character_id: string, } } | { "evt": "channels.reaction", "payload": { channel_id: string, message_id: string, character_id: string, emoji: string, added: boolean, } } | { "evt": "channels.pin", "payload": { channel_id: string, message_id: string, by: string, pinned: boolean, } } | { "evt": "channels.member", "payload": { channel_id: string, character_id: string, added: boolean, } } | { "evt": "channels.resume_overflow", "payload": { channel_id: string, } } | { "evt": "calls.state", "payload": { call_id: string, kind: CallKind, state: CallSessionState, participants: Array<CallParticipant>, } } | { "evt": "calls.signal", "payload": { call_id: string, from: string, to: string, payload: unknown, } };
+at: string, } } | { "evt": "channels.typing", "payload": { channel_id: string, character_id: string, } } | { "evt": "channels.reaction", "payload": { channel_id: string, message_id: string, character_id: string, emoji: string, added: boolean, } } | { "evt": "channels.pin", "payload": { channel_id: string, message_id: string, by: string, pinned: boolean, } } | { "evt": "channels.member", "payload": { channel_id: string, character_id: string, added: boolean, } } | { "evt": "channels.resume_overflow", "payload": { channel_id: string, } } | { "evt": "calls.state", "payload": { call_id: string, kind: CallKind, state: CallSessionState, participants: Array<CallParticipant>, 
+/**
+ * STUN/TURN servers for WebRTC (§5, §10.4): static config, echoed into
+ * every snapshot so the client always has the current ICE config. `[]`
+ * when no relay is configured. Shape: `[{ urls, username?, credential? }]`
+ * (RTCIceServer). Added in Sprint 6 part B — additive over part A.
+ */
+ice_servers: unknown, } } | { "evt": "calls.signal", "payload": { call_id: string, from: string, to: string, payload: unknown, } } | { "evt": "calls.voice", "payload": { call_id: string, action: VoiceAction, characters: Array<string>, } };

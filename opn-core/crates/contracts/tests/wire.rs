@@ -496,6 +496,7 @@ fn push_calls_state() {
                     state: CallParticipantState::Ringing,
                 },
             ],
+            ice_servers: json!([]),
         },
     };
     assert_eq!(
@@ -510,7 +511,8 @@ fn push_calls_state() {
                 "participants": [
                     {"character_id": "0198c5b6-0000-7000-8000-000000000042", "state": "joined"},
                     {"character_id": "0198c5b6-0000-7000-8000-000000000043", "state": "ringing"}
-                ]
+                ],
+                "ice_servers": []
             }
         })
     );
@@ -540,6 +542,50 @@ fn push_calls_signal() {
             }
         })
     );
+}
+
+// ── tenant link (Sprint 6 part B, §5) ────────────────────────────────────────
+
+#[test]
+fn push_calls_voice() {
+    use contracts::types::VoiceAction;
+    let push = ServerMsg::Push {
+        topic: "link".into(),
+        evt: Evt::CallsVoice {
+            call_id: u("40"),
+            action: VoiceAction::SetTargets,
+            characters: vec![u("42"), u("43")],
+        },
+    };
+    assert_eq!(
+        serde_json::to_value(&push).expect("serialize"),
+        json!({
+            "topic": "link",
+            "evt": "calls.voice",
+            "payload": {
+                "call_id": "0198c5b6-0000-7000-8000-000000000040",
+                "action": "set_targets",
+                "characters": [
+                    "0198c5b6-0000-7000-8000-000000000042",
+                    "0198c5b6-0000-7000-8000-000000000043"
+                ]
+            }
+        })
+    );
+}
+
+#[test]
+fn link_hello_shape() {
+    use contracts::types::LinkHello;
+    let hello = LinkHello {
+        resource_version: "1.2.3".into(),
+        contracts_version: "0.1.0".into(),
+    };
+    let golden = json!({ "resource_version": "1.2.3", "contracts_version": "0.1.0" });
+    assert_eq!(serde_json::to_value(&hello).expect("serialize"), golden);
+    let back: LinkHello = serde_json::from_value(golden).expect("deserialize");
+    assert_eq!(back.resource_version, "1.2.3");
+    assert_eq!(back.contracts_version, "0.1.0");
 }
 
 // ── notify (Sprint 3) ────────────────────────────────────────────────────────

@@ -74,6 +74,19 @@ async fn create_tenant(args: &[String]) -> Result<()> {
         if exists.is_none() {
             bail!("no such world: {id}");
         }
+        // One tenant per world (§5): the tenant link is keyed by world, so a
+        // second tenant on the same world would silently take over its link.
+        // Enforce the invariant where tenants are born; multi-tenant hosting
+        // (§17) will need a different link keying before lifting this.
+        let has_tenant: Option<i32> =
+            sqlx::query_scalar("SELECT 1 FROM tenants WHERE world_id = $1")
+                .bind(id)
+                .fetch_optional(&pool)
+                .await
+                .context("world tenant lookup")?;
+        if has_tenant.is_some() {
+            bail!("world {id} already has a tenant (one tenant per world, §5)");
+        }
         id
     };
 

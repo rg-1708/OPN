@@ -307,6 +307,37 @@ pub async fn snapshot(pool: &PgPool, world: Uuid, call_id: Uuid) -> Result<CallS
     })
 }
 
+/// `GET /v1/tenants/self/calls/active` (§5): every non-ended session in the
+/// world with its participants, for the tenant link's re-sync on (re)connect.
+/// N+1 over sessions, bounded by the handful of concurrent calls — no cursor,
+/// per the design (§5). One `world_tx` so RLS scopes both reads.
+pub async fn active_calls(pool: &PgPool, world: Uuid) -> Result<Vec<CallSnapshot>, Fail> {
+    let mut tx = world_tx(pool, world).await?;
+    let sessions: Vec<(Uuid, String, String)> = sqlx::query_as(
+        "SELECT id, kind, state FROM call_sessions WHERE state <> 'ended' ORDER BY created_at",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    let mut out = Vec::with_capacity(sessions.len());
+    for (id, kind, state) in sessions {
+        let parts: Vec<(Uuid, String)> = sqlx::query_as(
+            "SELECT character_id, state FROM call_participants WHERE call_id = $1 \
+             ORDER BY character_id",
+        )
+        .bind(id)
+        .fetch_all(&mut *tx)
+        .await?;
+        out.push(CallSnapshot {
+            call_id: id,
+            kind: parse_kind(&kind),
+            state: parse_session(&state),
+            participants: to_participants(parts),
+        });
+    }
+    tx.commit().await?;
+    Ok(out)
+}
+
 /// `calls.signal` authorization (§10.4): both sender and `to` must be active
 /// (ringing|joined) participants of a ringing/active session. Missing call →
 /// `NotFound`; ended session → `Conflict`; either party inactive → `Forbidden`.
@@ -341,6 +372,88 @@ pub async fn authorize_signal(
         return Err(Fail::Code(ErrCode::Forbidden));
     }
     Ok(())
+}
+
+/// Janitor orphaned-active-call candidates (§10.4, §5): every `active` session
+/// older than 60 s with its currently-`joined` character ids. The janitor then
+/// asks the registry which are offline; a session with **no** joined participant
+/// still online is a double-crash orphan (a WS disconnect never transitions the
+/// row, §5) and gets ended by `end_active_orphans` so the link receives its
+/// `clear`. Age-gated so a call mid-setup (both briefly between sockets) is
+/// spared. Returns `(call_id, joined_character_ids)`.
+pub async fn active_reap_candidates(
+    pool: &PgPool,
+    world: Uuid,
+) -> anyhow::Result<Vec<(Uuid, Vec<Uuid>)>> {
+    let mut tx = world_tx(pool, world).await?;
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM call_sessions \
+         WHERE state = 'active' AND created_at < now() - interval '60 seconds'",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        let joined: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT character_id FROM call_participants WHERE call_id = $1 AND state = 'joined'",
+        )
+        .bind(id)
+        .fetch_all(&mut *tx)
+        .await?;
+        out.push((id, joined));
+    }
+    tx.commit().await?;
+    Ok(out)
+}
+
+/// Force-end the given orphaned `active` sessions (§10.4, §5), returning a
+/// snapshot per newly-ended one so the janitor emits the final `calls.state` and
+/// the link `clear`. The `AND state = 'active'` guard makes it idempotent and
+/// safe against a concurrent `hangup` that already ended the call (rule 7). Under
+/// the per-task advisory lock, like the ring reap.
+pub async fn end_active_orphans(
+    pool: &PgPool,
+    world: Uuid,
+    ids: &[Uuid],
+) -> anyhow::Result<Vec<CallSnapshot>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut tx = world_tx(pool, world).await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('janitor:calls_reap_orphaned'))")
+        .execute(&mut *tx)
+        .await?;
+    let ended: Vec<Uuid> = sqlx::query_scalar(
+        "UPDATE call_sessions SET state = 'ended', ended_at = now() \
+         WHERE id = ANY($1) AND state = 'active' RETURNING id",
+    )
+    .bind(ids)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    let mut snaps = Vec::with_capacity(ended.len());
+    for id in ended {
+        let (kind, state): (String, String) =
+            sqlx::query_as("SELECT kind, state FROM call_sessions WHERE id = $1")
+                .bind(id)
+                .fetch_one(&mut *tx)
+                .await?;
+        let parts: Vec<(Uuid, String)> = sqlx::query_as(
+            "SELECT character_id, state FROM call_participants WHERE call_id = $1 \
+             ORDER BY character_id",
+        )
+        .bind(id)
+        .fetch_all(&mut *tx)
+        .await?;
+        snaps.push(CallSnapshot {
+            call_id: id,
+            kind: parse_kind(&kind),
+            state: parse_session(&state),
+            participants: to_participants(parts),
+        });
+    }
+    tx.commit().await?;
+    Ok(snaps)
 }
 
 /// Janitor zombie-ring reap (§10.4): force-end any call still `ringing` past the

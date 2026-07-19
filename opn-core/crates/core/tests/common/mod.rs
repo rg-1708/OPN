@@ -81,6 +81,7 @@ pub fn test_config() -> Config {
         preauth_global_max: 1000,
         preauth_per_ip_max: 5,
         heartbeat_secs: 30,
+        ice_servers: serde_json::json!([]),
     }
 }
 
@@ -97,6 +98,7 @@ pub async fn test_state(pg: PgPool, cfg: Config) -> AppState {
         pg,
         redis,
         registry: Arc::new(opn_core::gateway::registry::SessionRegistry::default()),
+        links: Arc::new(opn_core::gateway::link::LinkRegistry::default()),
         limits: Arc::new(opn_core::infra::ratelimit::RateLimitTable::default()),
         preauth: Arc::new(opn_core::gateway::ws::PreauthCaps::default()),
         tenants: Arc::new(opn_core::infra::tenant_cache::TenantCache::default()),
