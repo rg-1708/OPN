@@ -163,6 +163,17 @@ pub async fn commit(state: &AppState, who: &Identity, media_id: Uuid) -> Result<
     }
 }
 
+/// Shared attachment gate (roadmap Sprint 8 item 2): every id must be a live
+/// media owned by the caller, else `forbidden`. Extracted now that channels and
+/// feed both attach media — one guard, one place. See [`all_owned_live`].
+pub async fn assert_owned_live(state: &AppState, who: &Identity, ids: &[Uuid]) -> Result<(), Fail> {
+    if all_owned_live(state, who, ids).await? {
+        Ok(())
+    } else {
+        Err(Fail::Code(ErrCode::Forbidden))
+    }
+}
+
 /// Attachment gate (roadmap Sprint 5 item 6): every id in a message's
 /// `media_ids` must be a `live` row owned by the sender. Distinct owned-live
 /// ids must equal distinct requested ids — a repeated or foreign id fails.

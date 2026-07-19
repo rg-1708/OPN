@@ -2,6 +2,7 @@
 import type { CallKind } from "./CallKind";
 import type { CallParticipant } from "./CallParticipant";
 import type { CallSessionState } from "./CallSessionState";
+import type { FeedActivityKind } from "./FeedActivityKind";
 import type { NotifyClass } from "./NotifyClass";
 import type { ReceiptKind } from "./ReceiptKind";
 import type { VoiceAction } from "./VoiceAction";
@@ -32,4 +33,4 @@ at: string, } } | { "evt": "channels.typing", "payload": { channel_id: string, c
  * when no relay is configured. Shape: `[{ urls, username?, credential? }]`
  * (RTCIceServer). Added in Sprint 6 part B — additive over part A.
  */
-ice_servers: unknown, } } | { "evt": "calls.signal", "payload": { call_id: string, from: string, to: string, payload: unknown, } } | { "evt": "calls.voice", "payload": { call_id: string, action: VoiceAction, characters: Array<string>, } };
+ice_servers: unknown, } } | { "evt": "calls.signal", "payload": { call_id: string, from: string, to: string, payload: unknown, } } | { "evt": "calls.voice", "payload": { call_id: string, action: VoiceAction, characters: Array<string>, } } | { "evt": "feed.activity", "payload": { app_id: string, kind: FeedActivityKind, post_id: string, actor: string, } };

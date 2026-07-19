@@ -7,6 +7,7 @@ use contracts::ErrCode;
 pub mod calls;
 pub mod channels;
 pub mod directory;
+pub mod feed;
 pub mod identity;
 pub mod ledger;
 pub mod media;

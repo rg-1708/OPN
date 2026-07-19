@@ -325,6 +325,20 @@ pub struct TransferItem {
     pub created_at: String,
 }
 
+// ── feed (OPN-CORE.md §10.3) ──────────────────────────────────────────────────
+
+/// What a `feed.activity` advisory reports (§10.3): a new post, a like, or a
+/// comment. Clients viewing the feed refresh on any of these; the closed set
+/// keeps the advisory typed rather than a free-form string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum FeedActivityKind {
+    Post,
+    Like,
+    Comment,
+}
+
 // ── tenant link (OPN-CORE.md §5) ──────────────────────────────────────────────
 
 /// Voice-target action on the tenant link (§5, §10.4): `set_targets` names the

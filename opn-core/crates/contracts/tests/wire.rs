@@ -575,6 +575,68 @@ fn push_calls_voice() {
 }
 
 #[test]
+fn client_frame_feed() {
+    roundtrip(
+        &ClientFrame {
+            id: 50,
+            cmd: Cmd::FeedPost {
+                app_id: "instapic".into(),
+                body: json!({ "text": "hello #world" }),
+                media_ids: vec![u("51")],
+            },
+        },
+        r#"{"id":50,"cmd":"feed.post","payload":{"app_id":"instapic","body":{"text":"hello #world"},"media_ids":["0198c5b6-0000-7000-8000-000000000051"]}}"#,
+    );
+    roundtrip(
+        &ClientFrame {
+            id: 51,
+            cmd: Cmd::FeedLike {
+                app_id: "instapic".into(),
+                post_id: u("50"),
+            },
+        },
+        r#"{"id":51,"cmd":"feed.like","payload":{"app_id":"instapic","post_id":"0198c5b6-0000-7000-8000-000000000050"}}"#,
+    );
+    roundtrip(
+        &ClientFrame {
+            id: 52,
+            cmd: Cmd::FeedFollow {
+                app_id: "instapic".into(),
+                account_id: u("52"),
+            },
+        },
+        r#"{"id":52,"cmd":"feed.follow","payload":{"app_id":"instapic","account_id":"0198c5b6-0000-7000-8000-000000000052"}}"#,
+    );
+}
+
+#[test]
+fn push_feed_activity() {
+    use contracts::types::FeedActivityKind;
+    let push = ServerMsg::Push {
+        topic: "feed:instapic".into(),
+        evt: Evt::FeedActivity {
+            app_id: "instapic".into(),
+            kind: FeedActivityKind::Like,
+            post_id: u("50"),
+            actor: u("52"),
+        },
+    };
+    assert_eq!(
+        serde_json::to_value(&push).expect("serialize"),
+        json!({
+            "topic": "feed:instapic",
+            "evt": "feed.activity",
+            "payload": {
+                "app_id": "instapic",
+                "kind": "like",
+                "post_id": "0198c5b6-0000-7000-8000-000000000050",
+                "actor": "0198c5b6-0000-7000-8000-000000000052"
+            }
+        })
+    );
+}
+
+#[test]
 fn link_hello_shape() {
     use contracts::types::LinkHello;
     let hello = LinkHello {

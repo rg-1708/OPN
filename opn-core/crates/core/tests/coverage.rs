@@ -76,6 +76,15 @@ fn every_cmd_names_its_covering_test() {
             Cmd::LedgerCapture { .. } => "ledger::hold_capture_release_lifecycle",
             Cmd::LedgerRelease { .. } => "ledger::hold_capture_release_lifecycle",
             Cmd::LedgerWithdraw { .. } => "exchange::withdraw_full_cycle, exchange::withdraw_expiry",
+            Cmd::FeedPost { .. } => "feed::post_creates_row_and_advises, feed::act_without_app_account_forbidden",
+            Cmd::FeedDelete { .. } => "feed::delete_cascades_children_author_only",
+            Cmd::FeedLike { .. } => {
+                "feed::like_counts_and_notifies_author, feed::concurrent_likes_count_exact"
+            }
+            Cmd::FeedUnlike { .. } => "feed::unlike_decrements_idempotent",
+            Cmd::FeedComment { .. } => "feed::comment_increments_count",
+            Cmd::FeedFollow { .. } => "feed::follow_unfollow_and_authz",
+            Cmd::FeedUnfollow { .. } => "feed::follow_unfollow_and_authz",
             Cmd::NotifySeen { .. } => "notify::seen_marks_rows",
             Cmd::NotifyClear => "notify::clear_empties_inbox",
         }
@@ -100,6 +109,10 @@ fn every_evt_names_its_covering_test() {
             Evt::CallsSignal { .. } => "calls::signal_relay_and_authz",
             Evt::CallsVoice { .. } => {
                 "link::set_targets_on_accept_and_clear_on_hangup, link::reap_emits_clear"
+            }
+            Evt::FeedActivity { .. } => {
+                "feed::like_and_comment_advise_feed (post/like/comment kinds), \
+                 feed::post_creates_row_and_advises"
             }
         }
     }

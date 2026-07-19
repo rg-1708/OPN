@@ -3,7 +3,8 @@ use ts_rs::TS;
 use uuid::Uuid;
 
 use crate::types::{
-    CallKind, CallParticipant, CallSessionState, NotifyClass, ReceiptKind, VoiceAction,
+    CallKind, CallParticipant, CallSessionState, FeedActivityKind, NotifyClass, ReceiptKind,
+    VoiceAction,
 };
 
 /// Every server→client pushed event. Same tagging idiom as `Cmd`.
@@ -150,6 +151,19 @@ pub enum Evt {
         action: VoiceAction,
         characters: Vec<Uuid>,
     },
+
+    /// Advisory feed activity on `feed:<app>` (§10.3): a post/like/comment
+    /// happened, so a client viewing that feed should refresh. Ephemeral by
+    /// design — a lost one costs a refresh, not correctness; the durable truth
+    /// (the post, the counts) is read over HTTP. `actor` is an app-account id.
+    /// The "your post was liked" signal is a separate durable `notify.event`.
+    #[serde(rename = "feed.activity")]
+    FeedActivity {
+        app_id: String,
+        kind: FeedActivityKind,
+        post_id: Uuid,
+        actor: Uuid,
+    },
 }
 
 /// Backpressure class (OPN-CORE.md §4.3): durable events close a slow
@@ -198,6 +212,9 @@ impl Evt {
             // A lost voice target leaves game-voice unbound; close the link (it
             // re-syncs active calls on reconnect, §5).
             Evt::CallsVoice { .. } => EvtClass::Durable,
+            // Advisory only: a dropped feed refresh-hint costs a stale view until
+            // the next read, never correctness — drop it under pressure (§10.3).
+            Evt::FeedActivity { .. } => EvtClass::Ephemeral,
         }
     }
 }

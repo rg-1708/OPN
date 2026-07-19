@@ -17,7 +17,7 @@ use super::topic::TopicKind;
 use crate::infra::auth::mint_jwt;
 use crate::infra::cursor;
 use crate::infra::ratelimit::class_of;
-use crate::primitives::{calls, channels, directory, identity, ledger, media, notify, Fail};
+use crate::primitives::{calls, channels, directory, feed, identity, ledger, media, notify, Fail};
 use crate::state::AppState;
 
 /// Handles one parsed frame, returns the ack. Never panics, never closes —
@@ -170,8 +170,13 @@ async fn run(
                     state.registry.push_to(handle, &topic, &snap);
                     Ok(None)
                 }
-                // Feed lands with its primitive in Sprint 8.
-                TopicKind::Feed(_) => Err(Fail::Code(ErrCode::NotFound)),
+                TopicKind::Feed(app_id) => {
+                    // Any character with an app account for the app may watch
+                    // (§10.3). Advisory-only stream, so no snapshot-on-sub.
+                    feed::authorize_sub(state, who, &app_id).await?;
+                    state.registry.subscribe(&topic, handle);
+                    Ok(None)
+                }
             }
         }
 
@@ -422,6 +427,41 @@ async fn run(
         }
         Cmd::LedgerWithdraw { amount } => Ok(Some(ledger::withdraw(state, who, amount).await?)),
 
+        Cmd::FeedPost {
+            app_id,
+            body,
+            media_ids,
+        } => Ok(Some(
+            feed::post(state, who, &app_id, &body, &media_ids).await?,
+        )),
+        Cmd::FeedDelete { app_id, post_id } => {
+            feed::delete(state, who, &app_id, post_id).await?;
+            Ok(None)
+        }
+        Cmd::FeedLike { app_id, post_id } => {
+            feed::like(state, who, &app_id, post_id, true).await?;
+            Ok(None)
+        }
+        Cmd::FeedUnlike { app_id, post_id } => {
+            feed::like(state, who, &app_id, post_id, false).await?;
+            Ok(None)
+        }
+        Cmd::FeedComment {
+            app_id,
+            post_id,
+            body,
+        } => Ok(Some(
+            feed::comment(state, who, &app_id, post_id, &body).await?,
+        )),
+        Cmd::FeedFollow { app_id, account_id } => {
+            feed::follow(state, who, &app_id, account_id, true).await?;
+            Ok(None)
+        }
+        Cmd::FeedUnfollow { app_id, account_id } => {
+            feed::follow(state, who, &app_id, account_id, false).await?;
+            Ok(None)
+        }
+
         Cmd::NotifySeen { ids } => {
             notify::seen(&state.pg, who, &ids).await?;
             Ok(None)
@@ -480,6 +520,13 @@ fn wire_name(cmd: &Cmd) -> &'static str {
         Cmd::LedgerCapture { .. } => "ledger.capture",
         Cmd::LedgerRelease { .. } => "ledger.release",
         Cmd::LedgerWithdraw { .. } => "ledger.withdraw",
+        Cmd::FeedPost { .. } => "feed.post",
+        Cmd::FeedDelete { .. } => "feed.delete",
+        Cmd::FeedLike { .. } => "feed.like",
+        Cmd::FeedUnlike { .. } => "feed.unlike",
+        Cmd::FeedComment { .. } => "feed.comment",
+        Cmd::FeedFollow { .. } => "feed.follow",
+        Cmd::FeedUnfollow { .. } => "feed.unfollow",
         Cmd::NotifySeen { .. } => "notify.seen",
         Cmd::NotifyClear => "notify.clear",
     }

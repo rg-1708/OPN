@@ -316,6 +316,61 @@ pub enum Cmd {
         amount: i64,
     },
 
+    // ── feed (§10.3) ─────────────────────────────────────────────────────
+    /// Author a post as the caller's active account for `app_id` (§10.3). `body`
+    /// is an opaque app-owned doc (≤ 4 KB); `media_ids` must be live media owned
+    /// by the caller. Hashtags are parsed server-side from `body.text`. Not
+    /// logged into the app → `forbidden`. Ack `{ post_id }`.
+    #[serde(rename = "feed.post")]
+    FeedPost {
+        app_id: String,
+        #[ts(type = "unknown")]
+        body: serde_json::Value,
+        media_ids: Vec<Uuid>,
+    },
+    /// Delete one of the caller's own posts (§10.3): author-only, hard delete,
+    /// cascading its likes/comments/hashtags in one tx.
+    #[serde(rename = "feed.delete")]
+    FeedDelete {
+        app_id: String,
+        post_id: Uuid,
+    },
+    /// Like a post (§10.3): idempotent, bumps `like_count` in-tx and (on a real
+    /// change) advises the feed + silently notifies the author.
+    #[serde(rename = "feed.like")]
+    FeedLike {
+        app_id: String,
+        post_id: Uuid,
+    },
+    /// Remove the caller's like (§10.3): idempotent, decrements `like_count`.
+    #[serde(rename = "feed.unlike")]
+    FeedUnlike {
+        app_id: String,
+        post_id: Uuid,
+    },
+    /// Comment on a post (§10.3): `body` ≤ 4 KB, bumps `comment_count` in-tx.
+    /// Ack `{ comment_id }`.
+    #[serde(rename = "feed.comment")]
+    FeedComment {
+        app_id: String,
+        post_id: Uuid,
+        #[ts(type = "unknown")]
+        body: serde_json::Value,
+    },
+    /// Follow another account in the app (§10.3): idempotent; self-follow is
+    /// `invalid`, an unknown target is `not_found`.
+    #[serde(rename = "feed.follow")]
+    FeedFollow {
+        app_id: String,
+        account_id: Uuid,
+    },
+    /// Unfollow an account (§10.3): idempotent.
+    #[serde(rename = "feed.unfollow")]
+    FeedUnfollow {
+        app_id: String,
+        account_id: Uuid,
+    },
+
     // ── notify (§10.8) ───────────────────────────────────────────────────
     #[serde(rename = "notify.seen")]
     NotifySeen {

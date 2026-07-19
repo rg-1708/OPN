@@ -60,9 +60,7 @@ pub async fn send(
     // Attachment gate (roadmap Sprint 5 item 6, un-gating Sprint 3 item 3):
     // every attached media id must be a live row owned by the sender.
     if let Some(ids) = body.media_ids.as_ref().filter(|m| !m.is_empty()) {
-        if !super::media::all_owned_live(state, who, ids).await? {
-            return Err(Fail::Code(ErrCode::Forbidden));
-        }
+        super::media::assert_owned_live(state, who, ids).await?;
     }
     let body_json = serde_json::to_value(body).map_err(|e| Fail::Internal(e.into()))?;
 

@@ -6,7 +6,169 @@ to OPN-CORE.md as CDRs — this file records *how the build actually went*.
 
 ---
 
-## 2026-07-19 (latest) — Sprint 7 **part B** (exchange: deposit, two-leg withdraw, reconciliation cross-check, bridge journal + doc): built, verified live; **Sprint 7 complete**
+## 2026-07-19 (latest) — Sprint 8 **part A** (feed write plane: schema, posts/follows/likes/comments, advisory event, hashtag parse, media-gate extraction, sub authz): built, verified live; HTTP read surface (part B) deferred
+
+Sprint 8 (feed) is one cohesive primitive with no shared-nothing *table* seam like Sprints 4–7
+had (media/directory, calls/link, ledger/exchange each split on disjoint tables). So it splits
+on a different axis — the **write plane vs the read plane**. **(A)** the schema + every write
+command (`feed.post/delete/like/unlike/comment/follow/unfollow`) + the advisory `feed.activity`
+event + sub authorization + the durable author-notify; **(B)** the HTTP read surface — the
+fan-out-on-read home timeline, profile timeline, post detail + comments, hashtag page, all on the
+cursor idiom, plus the 100 k-row `EXPLAIN` test and the p95 perf number. The migration is
+front-loaded into A (all five tables; retrofit cost lives in the schema), and B builds on A's
+committed base. No roadmap amendment — the read surface is roadmap items 3 + part of 4, unchanged.
+
+### What exists now
+
+- **Migration `0012_feed.sql`** — five FORCE-RLS world-scoped tables. `posts` (opaque `body jsonb`,
+  `media_ids uuid[]`, denormalized `like_count`/`comment_count int` with `CHECK (>= 0)` backstops),
+  `follows` (PK `(world, app, follower, followee)` = the home-timeline lookup), `likes`
+  (PK `(post_id, account_id)`), `comments`, `hashtags` (PK `(world, app, tag, post_id)`). Two post
+  indexes: `posts_home (world, app, created_at DESC, id DESC)` for the home feed and
+  `posts_author (world, app, author_account, created_at DESC, id DESC)` for profiles; plus
+  `comments_post` and `hashtags_post` for the cursor read + cascade. FKs to `app_accounts`/`posts`,
+  no `ON DELETE CASCADE`. Standard 0001 NULLIF RLS DO-loop.
+- **`primitives/feed/mod.rs`** (single-file, directory-shape — no FSM). Seven handlers + `authorize_sub`
+  + the `active_account` resolver + hand-written hashtag parse. Every write authors as the caller's
+  **active app account** (`sessions.app_accounts->>app_id`), never a payload id. A like bumps
+  `like_count` in-tx and, on a real change, advises the feed **and** silently notifies the post
+  author (via the author's character, `notify::route`, skipping self-likes). Delete is author-only
+  and cascades children explicitly in one tx.
+- **The shared media gate extracted** (roadmap item 2): `media::assert_owned_live` now that channels
+  and feed both attach media — one guard, one place; `channels.send` was switched to it.
+- **Contracts** — 7 `Cmd` (`feed.*`, rate class `Social`), 1 `Evt` (`feed.activity`, **Ephemeral** —
+  advisory), `FeedActivityKind {post,like,comment}`. Bindings regenerated (Cmd/Evt/ClientFrame/
+  ServerMsg + new `FeedActivityKind.ts`), 2 golden wire tests, coverage match-arms for all 7 + the event.
+- **Wiring** — dispatch (7 command arms + the `sub feed:<app>` arm, which the Sprint 2 stub returned
+  `not_found` for), `wire_name`, rate classes, coverage.
+
+### Decisions closed during implementation (roadmap deviations, all ponytail)
+
+1. **Write-plane/read-plane seam** (vs a shared-nothing table seam). Feed has no disjoint-table split,
+   so A = writes + events + schema + authz, B = the HTTP reads. The headline "fan-out-on-read" is B;
+   A is verifiable at the store+event level (writes persist, counts exact, advisory delivered),
+   exactly how the ledger part-A asserted balances via store reads before its read surface existed.
+2. **All five tables carry `world_id` + FORCE RLS.** The §10.3 sketch omits `world_id` on likes/
+   comments/hashtags, but the whole codebase makes every domain table world-isolated and the Sprint 9
+   RLS audit keys on the `world_id` column — so all five get it. Same class of logged column-add as
+   Sprint 7's `hold_id` / `currency`.
+3. **Added `posts_home (world, app, created_at DESC, id DESC)` beyond the roadmap's item-1 index.**
+   The roadmap's stated "timeline" index leads with `author_account` — that serves the *profile*
+   read (one author, by time), not the *home* fan-out-on-read, which orders by `created_at` across
+   many followed authors and would seq-scan without `created_at` right after the equality columns.
+   Both shipped; part B's `EXPLAIN` test gates on `posts_home`. A correction, not a contradiction —
+   logged here rather than a CDR (§10.3 leaves indexing to the roadmap).
+4. **Feed acts as the caller's ACTIVE app account**, resolved from the session (`app_accounts->>app_id`),
+   never a payload-supplied account id. Sub authz is looser — owns *any* account for the app. Closes
+   the "who authors" question §10.3/roadmap left open; coherent with `identity.app_login` storing the
+   active account per session. Consequence (documented): a character with two accounts in one app acts
+   as, and manages, only its *active* one — switch accounts to manage the other's posts.
+5. **Explicit child deletes, not FK `ON DELETE CASCADE`.** Keeps every removal inside the RLS-scoped
+   `world_tx` (the "all access through world_tx" convention) and sidesteps the RLS-vs-RI-cascade
+   question entirely. The FKs (no cascade) still guarantee no orphan and make a dropped child-delete
+   fail loudly.
+6. **`MEDIA_MAX = 8` per post** (roadmap silent) bounds the owned+live check; **hashtags parsed from
+   `body.text`** (§10.3 says "server-side at post time"; `text` is the natural source), hand-written
+   (no `regex` dep — matches the gif-host hand-parse), `char::is_alphanumeric` standing in for `\p{Alnum}`.
+
+### The keepers this session (the point of rule 4)
+
+Ran the budgeted adversarial pass as **three independent lenses** — correctness/SQL, security/RLS/authz,
+and the independent test-author — in parallel, then triaged every finding against the code. The
+**security lens came back provably clean**: every feed query runs inside `world_tx(who.world_id)`, every
+INSERT binds the caller's own `world_id` (so RLS `WITH CHECK` rejects a forged world), the actor is
+*always* the session's active account (no feed command trusts a payload account as the author), and the
+like-notify carries the liker's account to the author but never leaks the author's character back to the
+liker — cross-world and cross-account impersonation are structurally closed. The one hardening note (an
+uncapped `app_id` on the write path, unlike the `sub` path's 64-char cap) was folded in. Three real
+keepers came out of the other two lenses, none visible to the 9 green happy-path tests:
+
+1. **A null body 500 (self-found before the review, LOW).** A media-only post with `body: null` passed
+   validation (media present) but `posts.body` is `jsonb NOT NULL`, so it would hit the constraint as
+   an `internal` instead of a clean `invalid`. Fixed at the boundary: `validate_doc` rejects JSON null;
+   a media-only post sends `{}`.
+2. **A delete/like-comment FK race (correctness lens, MED — the keeper).** `like`/`comment` did a
+   *non-locking* post-existence read then inserted a child row FK-referencing `posts`; a concurrent
+   author `delete` committing in the window trips the FK — surfacing as `internal` for the liker, **or**,
+   the other way, the `DELETE FROM posts` FK-violates against a just-committed like and the **delete
+   500s and rolls back, leaving the post undeleted**. Root cause: no post lock. Fixed by taking
+   `FOR UPDATE` on the post as the *first* post-touching op in all three handlers (delete collapsed to
+   one locking `SELECT author_account … FOR UPDATE`) — a single lock point per handler, so the ops
+   serialize with **no lock-upgrade path and thus no deadlock** (the naive `FOR KEY SHARE` + counter
+   `UPDATE` would deadlock two concurrent likers; `FOR UPDATE` doesn't, and it's the same per-post lock
+   the count bump already took, so no added contention). Verified: concurrent likes 12/12 clean under
+   the change, plus a new 50-round `delete_like_race_never_internal` storm asserting neither op ever
+   returns `internal`.
+3. **The independent test-author leg landed the sprint's keeper, sixth sprint running: the advisory
+   `feed.activity` on the LIKE and COMMENT paths was observed by NO test.** `activity()` is
+   fire-and-forget post-commit (its result discarded, never on the ack), so a broken or mislabeled
+   emit on 2 of its 3 sites would ship completely green — every existing test only ever saw the *post*
+   activity, and `coverage.rs` named that one test for the whole `FeedActivity` event (true-but-lying by
+   omission). Same class as the calls-voice ledger drift. Closed with `like_and_comment_advise_feed`
+   (a watcher observing post→like→comment in order, each with the right `kind` + `actor`, plus absence
+   on an idempotent re-like and on delete), and the coverage entry corrected to name it.
+
+The same leg also flagged that **like/comment `not_found` — including the cross-app `app_id`-scope guard —
+was untested**: dropping `AND p.app_id = $2` (letting an account like a post in a *different* app) would
+ship green. Now `like_comment_missing_post_not_found` drives a missing id and a real-post-wrong-app probe,
+both → `not_found`. Also added `self_like_no_notify` (the `author_account != account` guard's equal case,
+which no other test hit — a *removed* guard would have self-notified invisibly) and `post_media_validated`
+(the extracted `assert_owned_live` gate: >8 ids → invalid, foreign id → forbidden, media-only `{}` post → ok).
+
+### Verification (rule 4)
+
+- `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` clean (the `core` crate's
+  `unwrap_used` deny respected — `?`/`.expect` in tests only).
+- **Full workspace suite green** against the live stack (Postgres+Redis+MinIO): 0 failures across all
+  binaries. New `tests/feed.rs` (**14**): post + advisory, not-logged-in `forbidden` (post + sub),
+  author-only cascade delete, like counter + author-notify + idempotent re-like, unlike decrement +
+  no-underflow, comment count, follow/unfollow + self/unknown authz, the 32-way concurrent-likes
+  count-exactness, cross-world RLS, the delete/like race storm, the 3-kind advisory, cross-app
+  `not_found`, self-like-no-notify, and the media gate. Plus 5 `feed/mod.rs` unit tests (hashtag parse
+  edges, content/size/null-body). `wire.rs` +2 feed goldens (32 total).
+- **Concurrency flakiness: 12/12** on the 32-way like storm *after* the `FOR UPDATE` change (deadlock-
+  freedom confirmed empirically) + the 50-round delete/like race storm green.
+- Drift gate re-armed: `Cmd`/`Evt`/`ClientFrame`/`ServerMsg` regenerated + new `FeedActivityKind.ts`.
+
+### Exit criteria status (Sprint 8 — part A slice)
+
+| Criterion | Status |
+|---|---|
+| All `feed.*` commands + routes in coverage tests | **PARTIAL** — all 7 `feed.*` + `feed.activity` in the coverage match-test; feed adds **no HTTP route in A** (the reads are part B), so the route-coverage test is trivially satisfied. |
+| 100 k-row `EXPLAIN` test green | **DEFERRED (part B)** — the home timeline query + its index (`posts_home`) exist; the `EXPLAIN`-no-seq-scan test lands with the read surface. |
+| p95 timeline read < 10 ms at 100 k posts (recorded) | **DEFERRED (part B)** — needs the read endpoint. |
+
+### Reflection
+
+- **A new kind of seam.** Sprints 4–7 split on disjoint tables; feed has none, so it split on
+  writes-vs-reads. The dividend held anyway — A is a complete reviewed slice and B starts from green.
+- **The independent test leg caught the sprint's defect a sixth straight time**, and it was the
+  *fire-and-forget advisory* class again (like calls-voice): an emit site with no ack coupling is
+  invisible to happy-path tests until someone subscribes and watches it. That is exactly the budgeted
+  verification ADR-1 buys — the desk-check reads "like publishes an activity" as obviously fine.
+- **Root-cause over symptom held.** The FK-race fix went into all three shared handlers (every future
+  caller serialized), not a per-caller guard; the media gate was extracted to one function both callers
+  share; the null-body reject sits at the one validation boundary.
+- **Design-doc latitude, not contradiction.** §10.3 left the world_id-on-all-tables, the authorship
+  model, and the home index open; closed in code and logged here, no CDR, since nothing contradicts the
+  design.
+
+### Not committed / next session
+
+- **Sprint 8 part A is complete and green but untracked** on top of the committed 0–7. First commit
+  re-arms the drift gate (4 modified bindings + new `FeedActivityKind.ts`) — the operator's call, as
+  every sprint.
+- **Sprint 8 part B — the feed read surface.** Home timeline (the EXISTS fan-out-on-read on `posts_home`
+  + the 100 k `EXPLAIN`-no-seq-scan test + the p95 number), profile timeline, post detail + comments,
+  hashtag page — all HTTP on the cursor idiom (CDR-7). The author-notify-on-like is already done in A.
+- Still open, minor, none blocking: the offline-author `post_liked` → inbox path is exercised only by
+  notify's own suite (a feed-context test is optional, shared code); the multi-account-per-app
+  "act as active only" semantics (documented in the module); pre-existing online-member badging,
+  Bearer case-sensitivity, `identity.me` own-last-seen.
+
+---
+
+## 2026-07-19 (Sprint 7B) — Sprint 7 **part B** (exchange: deposit, two-leg withdraw, reconciliation cross-check, bridge journal + doc): built, verified live; **Sprint 7 complete**
 
 Part A shipped the ledger core and stopped on the shared-nothing seam (A = accounts/
 transfers/holds + the invariant machinery, B = the framework exchange). Part B lands the

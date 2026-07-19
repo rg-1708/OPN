@@ -87,6 +87,15 @@ pub fn class_of(cmd: &contracts::Cmd) -> Class {
         | Cmd::CallsDecline { .. }
         | Cmd::CallsHangup { .. }
         | Cmd::CallsSignal { .. }
+        // Feed writes: posts/likes/comments/follows are occasional user actions;
+        // reads are HTTP (part B), not rate-classed here.
+        | Cmd::FeedPost { .. }
+        | Cmd::FeedDelete { .. }
+        | Cmd::FeedLike { .. }
+        | Cmd::FeedUnlike { .. }
+        | Cmd::FeedComment { .. }
+        | Cmd::FeedFollow { .. }
+        | Cmd::FeedUnfollow { .. }
         | Cmd::NotifyClear => Class::Social,
         // Money movement (§12): the tight Money bucket (1/s, burst 2) — the class
         // it was added for. Transfers, holds, captures, releases all move or
