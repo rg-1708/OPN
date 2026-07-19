@@ -5,6 +5,7 @@
 //! calls the store, and routes the incoming-money notification. Exchange
 //! (deposit / withdraw + the `exchanges` table) is Sprint 7 part B.
 
+pub mod exchange;
 pub mod fsm;
 pub mod store;
 
@@ -100,6 +101,57 @@ pub async fn capture(
 /// `ledger.release { hold_id }` (§10.5): free a hold.
 pub async fn release(state: &AppState, who: &Identity, hold_id: Uuid) -> Result<(), Fail> {
     store::release(&state.pg, who.world_id, who.character_id, hold_id).await
+}
+
+/// `ledger.withdraw { amount }` (§10.5 item 4), WS leg 1 of the framework
+/// withdraw: reserve the caller's wallet with a hold and open a `pending_confirm`
+/// exchange. Ack `{ exchange_id }` — the client relays it to the bridge, which
+/// confirms via HTTP. Currency comes from the caller's tenant config.
+pub async fn withdraw(
+    state: &AppState,
+    who: &Identity,
+    amount: i64,
+) -> Result<serde_json::Value, Fail> {
+    let currency = exchange::tenant_currency(&state.pg, who.tenant_id).await?;
+    let exchange_id =
+        exchange::withdraw(&state.pg, who.world_id, who.character_id, &currency, amount).await?;
+    Ok(json!({ "exchange_id": exchange_id }))
+}
+
+/// Exchange deposit (§10.5 item 4), the HTTP bridge path: credit `character`'s
+/// wallet from the world's `system` account, idempotent on `exchange_id`. On a
+/// fresh credit, notify the character of incoming money (item 8). Currency comes
+/// from the tenant config.
+pub async fn deposit(
+    state: &AppState,
+    world: Uuid,
+    tenant: Uuid,
+    exchange_id: &str,
+    character: Uuid,
+    amount: i64,
+) -> Result<exchange::DepositOutcome, Fail> {
+    let currency = exchange::tenant_currency(&state.pg, tenant).await?;
+    let out =
+        exchange::deposit(&state.pg, world, exchange_id, character, amount, &currency).await?;
+    if out.fresh {
+        notify_incoming(state, world, out.credited, out.amount).await;
+    }
+    Ok(out)
+}
+
+/// Exchange withdraw_confirm (§10.5 item 4), the HTTP bridge path: settle the
+/// pending withdraw's hold to the `system` account. Idempotent on the exchange's
+/// terminal `done` state. Currency comes from the tenant config.
+pub async fn withdraw_confirm(
+    state: &AppState,
+    world: Uuid,
+    tenant: Uuid,
+    exchange_id: &str,
+    character: Uuid,
+    amount: i64,
+) -> Result<exchange::ConfirmOutcome, Fail> {
+    let currency = exchange::tenant_currency(&state.pg, tenant).await?;
+    exchange::withdraw_confirm(&state.pg, world, exchange_id, character, amount, &currency).await
 }
 
 /// Notify a credited character of incoming money (§10.5 item 8): class `alert`,

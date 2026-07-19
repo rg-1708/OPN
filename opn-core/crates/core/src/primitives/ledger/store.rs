@@ -30,14 +30,14 @@ use crate::primitives::Fail;
 
 // ── text ↔ enum (the DB stores lowercase text; fsm.rs carries the enum) ──
 
-fn hold_str(s: HoldState) -> &'static str {
+pub(super) fn hold_str(s: HoldState) -> &'static str {
     match s {
         HoldState::Held => "held",
         HoldState::Captured => "captured",
         HoldState::Released => "released",
     }
 }
-fn parse_hold(s: &str) -> HoldState {
+pub(super) fn parse_hold(s: &str) -> HoldState {
     match s {
         "captured" => HoldState::Captured,
         "released" => HoldState::Released,
@@ -193,7 +193,7 @@ pub async fn transfer(
 /// lock before inserting — so no hold can be committed on the account between the
 /// available-check and the debit. A future primitive that inserts a `holds` row
 /// without first locking the account would reintroduce a check-vs-debit race.
-async fn held_sum(
+pub(super) async fn held_sum(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     account: Uuid,
 ) -> Result<i64, Fail> {
@@ -282,10 +282,19 @@ pub async fn capture(
     // learn a hold's state (held vs already-settled) from the error code before
     // authz runs (adversarial review, Sprint 7A). `owner_character` is immutable,
     // so reading it here (account not yet `FOR UPDATE`) is safe.
+    // A hold that backs a pending withdraw exchange is off-limits to the public
+    // capture/release API — only `withdraw_confirm`/`expire_holds` may move it.
+    // Otherwise a character could capture their own withdraw's reservation
+    // elsewhere, leaving the exchange `pending_confirm` for the bridge to confirm
+    // after crediting the framework bank → money created (adversarial review,
+    // Sprint 7B). Filtered out, so it reads as a nonexistent hold.
     let hold: Option<(Uuid, i64, String, Option<Uuid>)> = sqlx::query_as(
         "SELECT h.account_id, h.amount, h.state, a.owner_character \
          FROM holds h JOIN accounts a ON a.id = h.account_id \
-         WHERE h.id = $1 FOR UPDATE OF h",
+         WHERE h.id = $1 \
+           AND NOT EXISTS (SELECT 1 FROM exchanges e \
+             WHERE e.hold_id = h.id AND e.state = 'pending_confirm') \
+         FOR UPDATE OF h",
     )
     .bind(hold_id)
     .fetch_optional(&mut *tx)
@@ -370,10 +379,15 @@ pub async fn capture(
 /// Conflict). Owner-only.
 pub async fn release(pool: &PgPool, world: Uuid, actor: Uuid, hold_id: Uuid) -> Result<(), Fail> {
     let mut tx = world_tx(pool, world).await?;
+    // Same exchange-backing guard as `capture`: a pending-withdraw hold is not
+    // releasable via the public API (adversarial review, Sprint 7B).
     let row: Option<(Option<Uuid>, String)> = sqlx::query_as(
         "SELECT a.owner_character, h.state \
          FROM holds h JOIN accounts a ON a.id = h.account_id \
-         WHERE h.id = $1 FOR UPDATE OF h",
+         WHERE h.id = $1 \
+           AND NOT EXISTS (SELECT 1 FROM exchanges e \
+             WHERE e.hold_id = h.id AND e.state = 'pending_confirm') \
+         FOR UPDATE OF h",
     )
     .bind(hold_id)
     .fetch_optional(&mut *tx)
@@ -466,7 +480,7 @@ pub async fn reconcile(pool: &PgPool, world: Uuid) -> anyhow::Result<Vec<Uuid>> 
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext('janitor:ledger_reconcile'))")
         .execute(&mut *tx)
         .await?;
-    let frozen: Vec<Uuid> = sqlx::query_scalar(
+    let mut frozen: Vec<Uuid> = sqlx::query_scalar(
         "UPDATE accounts a SET frozen_at = now() \
          WHERE a.frozen_at IS NULL \
            AND a.balance <> ( \
@@ -477,6 +491,14 @@ pub async fn reconcile(pool: &PgPool, world: Uuid) -> anyhow::Result<Vec<Uuid>> 
     )
     .fetch_all(&mut *tx)
     .await?;
+    // Exchange cross-check (§10.5 item 7): Σ(done exchanges) vs the matching
+    // system-account transfer legs (the distinct 'deposit'/'withdraw' kinds). A
+    // mismatch = an exchange row that lost or gained its money leg — corruption
+    // the per-account balance recompute above cannot see, because a missing
+    // leg + missing money is self-consistent on balances. Freezes the system
+    // account so exchange flow halts until a human looks. Runs in the same tx /
+    // advisory lock as the balance freeze.
+    frozen.extend(super::exchange::cross_check(&mut tx, world).await?);
     tx.commit().await?;
     if !frozen.is_empty() {
         counter!("opn_ledger_drift_total").increment(frozen.len() as u64);
@@ -499,6 +521,21 @@ pub async fn expire_holds(pool: &PgPool, world: Uuid) -> anyhow::Result<Vec<(Uui
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext('janitor:ledger_expire_holds'))")
         .execute(&mut *tx)
         .await?;
+    // Expire the withdraw exchanges backing to-be-released holds FIRST, then
+    // release the holds. This locks exchange rows before hold rows — the SAME
+    // order `withdraw_confirm` uses (exchange FOR UPDATE, then hold FOR UPDATE) —
+    // so a confirm racing a hold's expiry can't deadlock against this sweep
+    // (adversarial review, Sprint 7B). The subquery is a plain snapshot read (no
+    // lock); both statements share the `state='held' AND expires_at < now()`
+    // predicate, so they act on the same set. Idempotent (the `pending_confirm`
+    // guard).
+    sqlx::query(
+        "UPDATE exchanges SET state = 'expired' \
+         WHERE state = 'pending_confirm' \
+           AND hold_id IN (SELECT id FROM holds WHERE state = 'held' AND expires_at < now())",
+    )
+    .execute(&mut *tx)
+    .await?;
     let released: Vec<(Option<Uuid>, i64)> = sqlx::query_as(
         "UPDATE holds h SET state = 'released' \
          FROM accounts a \

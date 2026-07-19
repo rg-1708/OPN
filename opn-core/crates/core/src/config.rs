@@ -32,7 +32,11 @@ pub struct Config {
     /// Pre-auth connection caps (§4.1): sockets that have not yet sent a
     /// valid `auth` frame.
     pub preauth_global_max: u32,
-    pub preauth_per_ip_max: u8,
+    /// `u32`, not `u8`: many pre-auth sockets can share one source IP behind a
+    /// reverse proxy / NAT — and the perf smoke drives 300 loadgen connections
+    /// from localhost — so the ceiling must exceed 255 (both the config value and
+    /// the per-IP counter in `ws.rs` are `u32`).
+    pub preauth_per_ip_max: u32,
     /// WS ping interval; close after 2 missed pongs (§4.1). Configurable so
     /// the missed-pong test does not take a minute.
     pub heartbeat_secs: u64,

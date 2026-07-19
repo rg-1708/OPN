@@ -420,6 +420,7 @@ async fn run(
             ledger::release(state, who, hold_id).await?;
             Ok(None)
         }
+        Cmd::LedgerWithdraw { amount } => Ok(Some(ledger::withdraw(state, who, amount).await?)),
 
         Cmd::NotifySeen { ids } => {
             notify::seen(&state.pg, who, &ids).await?;
@@ -478,6 +479,7 @@ fn wire_name(cmd: &Cmd) -> &'static str {
         Cmd::LedgerHold { .. } => "ledger.hold",
         Cmd::LedgerCapture { .. } => "ledger.capture",
         Cmd::LedgerRelease { .. } => "ledger.release",
+        Cmd::LedgerWithdraw { .. } => "ledger.withdraw",
         Cmd::NotifySeen { .. } => "notify.seen",
         Cmd::NotifyClear => "notify.clear",
     }

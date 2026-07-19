@@ -10,6 +10,7 @@ use crate::state::AppState;
 
 pub mod auth;
 pub mod channels;
+pub mod exchange;
 pub mod ledger;
 pub mod media;
 pub mod notify;
@@ -22,6 +23,10 @@ pub fn app_router(state: AppState) -> Router {
         .route("/link", get(crate::gateway::link::link_handler))
         .route("/v1/tenants/self/sessions", post(tenant::mint_session))
         .route("/v1/tenants/self/calls/active", get(tenant::active_calls))
+        .route(
+            "/v1/tenants/self/exchange",
+            post(exchange::exchange).get(exchange::journal),
+        )
         .route("/v1/notify/inbox", get(notify::inbox))
         .route("/v1/media", get(media::list))
         .route("/v1/channels/{id}/messages", get(channels::history))

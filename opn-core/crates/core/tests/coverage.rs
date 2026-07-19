@@ -75,6 +75,7 @@ fn every_cmd_names_its_covering_test() {
             Cmd::LedgerHold { .. } => "ledger::hold_capture_release_lifecycle",
             Cmd::LedgerCapture { .. } => "ledger::hold_capture_release_lifecycle",
             Cmd::LedgerRelease { .. } => "ledger::hold_capture_release_lifecycle",
+            Cmd::LedgerWithdraw { .. } => "exchange::withdraw_full_cycle, exchange::withdraw_expiry",
             Cmd::NotifySeen { .. } => "notify::seen_marks_rows",
             Cmd::NotifyClear => "notify::clear_empties_inbox",
         }

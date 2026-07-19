@@ -304,6 +304,17 @@ pub enum Cmd {
     LedgerRelease {
         hold_id: Uuid,
     },
+    /// Start a framework withdraw (§10.5, OPN.md §14.2), leg 1 of 2: reserve
+    /// `amount` on the caller's wallet with a hold AND open a `pending_confirm`
+    /// exchange. Ack `{ exchange_id }` — the client relays it to the bridge, which
+    /// credits the framework bank and calls `withdraw_confirm` to settle the hold
+    /// to the tenant `system` account. Unconfirmed → the hold expires and the
+    /// exchange auto-expires (janitor).
+    #[serde(rename = "ledger.withdraw")]
+    LedgerWithdraw {
+        #[ts(type = "number")]
+        amount: i64,
+    },
 
     // ── notify (§10.8) ───────────────────────────────────────────────────
     #[serde(rename = "notify.seen")]

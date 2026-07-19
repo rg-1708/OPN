@@ -42,6 +42,18 @@ fn missing_var_error_names_the_var() {
     );
     std::env::remove_var("OPN_RECONCILE_HOUR");
 
+    // Per-IP pre-auth cap must accept a value > 255: many sockets share one
+    // source IP (proxy/NAT), and the perf smoke drives 300 loadgen connections
+    // from localhost with OPN_PREAUTH_PER_IP_MAX=400 — a `u8` overflowed at parse
+    // and panicked at startup (perf-smoke regression).
+    std::env::set_var("OPN_PREAUTH_PER_IP_MAX", "400");
+    let cfg = Config::from_env().expect("per-ip cap 400 parses");
+    assert_eq!(
+        cfg.preauth_per_ip_max, 400,
+        "per-ip cap holds a value > 255"
+    );
+    std::env::remove_var("OPN_PREAUTH_PER_IP_MAX");
+
     for (missing, _) in ALL {
         for (k, v) in ALL {
             std::env::set_var(k, v);

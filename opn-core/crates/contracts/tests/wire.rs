@@ -646,6 +646,17 @@ fn client_frame_ledger_release() {
     );
 }
 
+#[test]
+fn client_frame_ledger_withdraw() {
+    roundtrip(
+        &ClientFrame {
+            id: 64,
+            cmd: Cmd::LedgerWithdraw { amount: 750 },
+        },
+        r#"{"id":64,"cmd":"ledger.withdraw","payload":{"amount":750}}"#,
+    );
+}
+
 // ── notify (Sprint 3) ────────────────────────────────────────────────────────
 
 #[test]

@@ -94,7 +94,8 @@ pub fn class_of(cmd: &contracts::Cmd) -> Class {
         Cmd::LedgerTransfer { .. }
         | Cmd::LedgerHold { .. }
         | Cmd::LedgerCapture { .. }
-        | Cmd::LedgerRelease { .. } => Class::Money,
+        | Cmd::LedgerRelease { .. }
+        | Cmd::LedgerWithdraw { .. } => Class::Money,
         // Issuing a presigned upload signs policies and reserves a row — the
         // costliest command that isn't the hot path. Tight budget (§12).
         Cmd::MediaRequestUpload { .. } => Class::Expensive,

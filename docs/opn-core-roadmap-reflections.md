@@ -6,7 +6,198 @@ to OPN-CORE.md as CDRs — this file records *how the build actually went*.
 
 ---
 
-## 2026-07-19 (latest) — Sprint 7 **part A** (ledger: accounts/transfers/holds, deadlock-free transfer, hold FSM, capture/release, nightly reconciliation, hold-expiry, history): built, verified live; exchange (part B) deferred
+## 2026-07-19 (latest) — Sprint 7 **part B** (exchange: deposit, two-leg withdraw, reconciliation cross-check, bridge journal + doc): built, verified live; **Sprint 7 complete**
+
+Part A shipped the ledger core and stopped on the shared-nothing seam (A = accounts/
+transfers/holds + the invariant machinery, B = the framework exchange). Part B lands the
+other half: the one seam where value crosses between the framework bank and the ledger.
+It *builds on* A's transfer/hold machinery rather than sharing tables with it, so B started
+from the green, committed 0–7A base. With it **Sprint 7 is complete** — every exit criterion
+passes, including the bridge-facing doc (criterion 3, deferred from A). Seventh sprint the
+seam-split paid off. No roadmap amendment — exchange was always Sprint 7 item 4 + the
+`ledger.withdraw` half of item 3.
+
+### What exists now
+
+- **Migration `0011_exchange.sql`** — `tenants.currency` (the tenant config store, default
+  `'OPN'`, one-per-world so effectively per-world) + a `SELECT (currency)` grant; a partial
+  `accounts_system (world_id, currency) WHERE owner_kind='system'` so the system account
+  get-or-create can `ON CONFLICT`; and the FORCE-RLS world-scoped `exchanges` table (PK
+  `(world_id, id)` — the id is bridge-chosen for a deposit, Core-minted for a withdraw),
+  with a `hold_id` FK linking a withdraw to its backing hold, a journal keyset index, and a
+  partial pending-hold index. Standard 0001 NULLIF RLS.
+- **`primitives/ledger/exchange.rs`** (new, sibling of `store`/`fsm`) — `deposit` (idempotent
+  system→wallet credit, auto-creating the system account + wallet on first touch), `withdraw`
+  (WS leg 1: hold the wallet + open a `pending_confirm` exchange, return a Core-minted id),
+  `withdraw_confirm` (HTTP leg 2: capture the hold to system, exchange→`done`), `journal`
+  (the bridge's reconciliation feed), and `cross_check` (called from `store::reconcile`).
+- **The load-bearing decision — distinct transfer `kind`s.** A deposit writes a `kind='deposit'`
+  transfer (system→wallet); a withdraw-confirm writes a `kind='withdraw'` transfer (wallet→
+  system). The reconciliation cross-check compares Σ(done deposit exchanges) vs Σ(`kind='deposit'`)
+  and the same for withdraw. Because those two kinds are written ONLY by the exchange paths
+  (a plain user transfer is `'transfer'`, a user hold-capture is `'capture'`), the cross-check
+  is exact: it never false-freezes genesis funding or a user capture, and an orphaned exchange
+  (or a lost money leg) freezes the system account. This is what let part A's concurrency
+  battery keep passing untouched — its `kind='transfer'` funding is invisible to the cross-check.
+- **Wiring** — 1 `Cmd` (`ledger.withdraw`, rate class `Money`), no new `Evt` (a fresh deposit
+  rides `notify.event` alert like every incoming-money path); `POST/GET /v1/tenants/self/exchange`
+  (API-key `TenantAuth`; POST = deposit|withdraw_confirm on `direction`, GET = journal from an
+  RFC-3339 `since`); `store::expire_holds` now also flips a pending withdraw's exchange to
+  `expired` when its hold auto-releases; coverage match-arm + a golden wire test; bindings
+  regenerated (`Cmd`/`ClientFrame`). `time` gained the `parsing` feature for the `since` parse.
+- **`docs/opn-bridge-exchange.md`** — the normative bridge contract (exit criterion 3): auth,
+  the deposit/withdraw/journal wire shapes, the two-leg dance, idempotency + retry rules, the
+  bank-debit-first ordering, and what a system freeze means for the bridge.
+
+### Decisions closed during implementation (roadmap deviations, all ponytail)
+
+1. **Distinct `kind`s ('deposit'/'withdraw') for the cross-check**, vs a "transfers whose leg
+   touches a system account" join. The kind-partition decouples the detector from user transfers/
+   captures entirely — no false freeze, and zero churn to part A's tests (their system-funded
+   genesis stays `kind='transfer'`). One column value carries the whole cross-check.
+2. **`currency` as a `tenants` column.** The roadmap says "currency from tenant config"; the
+   tenants row *is* the tenant config store, so a column (with a default so existing tenants keep
+   working) is the minimal home. System + wallet are both created with it, so the part-A
+   currency-match is satisfied by construction — no cross-currency path in v1.
+3. **`hold_id` added to the `exchanges` tuple** (the roadmap's tuple omitted it). It links a
+   withdraw to its reservation so `expire_holds` can auto-expire the exchange when the hold
+   releases — the roadmap's own "unconfirmed → hold expiry + exchange `state=expired`" needs the
+   link. A column addition, logged here (same weight as part A's currency-match call), not a CDR.
+4. **Deposit/withdraw_confirm are HTTP (bridge); withdraw leg 1 is WS (the in-game app).** Exactly
+   the roadmap split — the app *starts* a withdraw, the bridge *confirms* it. The journal `?since`
+   is an inclusive RFC-3339 keyset (bridge dedupes by id), not a compound cursor — the exchange
+   id is text, so the shared Uuid cursor util doesn't fit, and a reconciliation feed tolerates
+   re-reading a boundary microsecond. Ceiling marked in code.
+5. **`WITHDRAW_HOLD_SECS` a const (1 h), not config** — one seam, no operator has asked to tune it;
+   `ponytail:` marked with the promote-to-env path.
+
+### The keepers this session (the point of rule 4): a money-creation path and a half-enforced freeze
+
+Ran the budgeted adversarial pass as **three independent lenses** — correctness/SQL/conservation,
+security/RLS/authz, and the independent test-author — then triaged all findings myself against the
+code. The conservation and isolation cores came back **provably clean** (every exchange path pairs
+one balance move with exactly one transfer row; every query runs inside `world_tx`; deposit can't
+target a system account or cross worlds; withdraw leg 1 only ever touches the caller's own wallet;
+withdraw_confirm can't double-capture — a settled hold's FSM returns `Conflict`) — the verification
+thesis working, the hard properties *argued* not hoped. Six real defects came out of the other
+edges, none visible to the 6 green happy-path tests, and two were genuine keepers:
+
+1. **A latent money-creation path (correctness lens, MED — the keeper).** A withdraw's backing
+   hold was an ordinary `holds` row, and the *public* `ledger.capture`/`ledger.release` only check
+   owner + the hold FSM — they were exchange-unaware. A character could `ledger.withdraw{100}`
+   (hold H + pending exchange E), then `ledger.capture{H → their other account}`: H settles
+   wherever they chose, **E stays `pending_confirm`**. The bridge — which credits the framework
+   bank *before* confirming — then calls `withdraw_confirm(E)`, which finds H already captured and
+   fails, so the wallet was never debited for the withdraw. **Money created.** Gated today only by
+   the hold_id being an unguessable v7 uuid never returned on the wire — but that's a
+   defense-by-obscurity, not a structural barrier, and a money invariant deserves the belt. Fixed
+   at root cause: `capture`/`release`'s hold lookup now filters out any hold backing a
+   `pending_confirm` exchange (`AND NOT EXISTS (... state='pending_confirm')`), so a withdraw hold
+   reads as nonexistent to the public API — only `withdraw_confirm`/`expire_holds` can move it.
+2. **The reconciliation freeze was only half-enforced (correctness + security, MED — two lenses
+   converged).** `cross_check` freezes the system account on drift specifically "to halt exchange
+   flow", and `deposit` honored it — but `withdraw_confirm` checked only the *wallet's*
+   `frozen_at`, not the system's (it even had the row in hand). So during an active
+   money-integrity incident, deposits would 409 while withdraws kept settling `wallet → system`,
+   pushing more money through the very account under investigation. Fixed: `withdraw_confirm`
+   rejects if *either* locked row is frozen (one-line, data already fetched).
+
+And the independent test-author leg landed its own keeper, sixth sprint running: **the one test
+that claimed to cover the `withdraw_confirm` field-mismatch → `Invalid` guard asserted the wrong
+thing** — it passed a *deposit* id, hit the direction filter, and asserted `404`, never reaching
+the `ex_char != character || ex_amount != amount` guard at all. Deleting or inverting that guard
+would have passed the whole suite green. Now `withdraw_confirm_rejects_mismatch` drives a *real*
+pending withdraw and confirms wrong-character and wrong-amount both `→ 400` with the exchange left
+pending. Same leg also found the cross-check's **withdraw half was never exercised** (only the
+deposit-orphan case fired a freeze) — a typo in that half would ship a silently-dead detector;
+now `cross_check_freezes_orphan_withdraw` mirrors it.
+
+### Also fixed / documented from the review
+
+- **Concurrent first-touch get-or-create was NOT race-safe (correctness, MED).** The
+  `INSERT … ON CONFLICT DO NOTHING … UNION SELECT` idiom has the classic READ-COMMITTED snapshot
+  hole: the loser blocks on the winner's insert, then its `SELECT` uses the pre-winner snapshot
+  and returns zero rows → a spurious `RowNotFound`/500. Fixed to `ON CONFLICT … DO UPDATE SET
+  currency = EXCLUDED.currency RETURNING id`, which locks and returns the conflicting row — one
+  statement, always one row, and simpler than the CTE.
+- **A `withdraw_confirm` ⇄ `expire_holds` lock-order inversion → production deadlock (correctness,
+  MED).** Confirm locked exchange-then-hold; the janitor's `expire_holds` locked hold-then-
+  exchange — opposite order on the same pair, deadlockable whenever a confirm raced a hold's
+  expiry. Fixed by reordering `expire_holds` to update the exchanges *before* releasing the holds,
+  so both paths lock exchange-before-hold. (12× flakiness run, 0 deadlocks.)
+- **Deposit's own locking relied on an implicit invariant (correctness, MED/LOW).** It locked
+  system-then-wallet (not id-ordered), safe only because the system account's v7 id is always <
+  the wallet's — true in prod but not a stated invariant. Switched to the same `IN($a,$b) ORDER BY
+  id FOR UPDATE` idiom every other money op uses; the implicit dependency is gone.
+- **Deposit idempotency now validates the replay matches the stored exchange** (correctness, LOW):
+  reusing an id for a *different* character/amount → `Invalid`, symmetric with `withdraw_confirm`
+  (was: returned a wrong-but-"success" ack).
+- **Accepted / documented, not fixed:** the cross-check sums per-direction over *all* currencies,
+  so at v1's one-currency-per-world it's exact but a future multi-currency world could mask two
+  canceling drifts — noted, revisit with multi-currency; the withdraw_confirm wallet↔system
+  currency-match is unreachable (`tenants.currency` has no mutation path) — noted; the exchange
+  HTTP endpoints have no per-tenant rate limit, consistent with *every* API-key HTTP route
+  (`/sessions`, `/calls/active`) — the bridge key is trusted, blast radius is the tenant's own
+  world (RLS), a Sprint-10 budget-tuning candidate, not an exchange-specific gap.
+
+### Verification (rule 4)
+
+- `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` clean (the `core` crate's
+  `unwrap_used` deny respected — `?`/`.expect`/`matches!` only).
+- **Full workspace suite green** against the live stack (Postgres+Redis+MinIO): 29 binaries,
+  0 failures. New `tests/exchange.rs` (**13**): deposit idempotency + wallet auto-create + system
+  mint, the additive second deposit, deposit-notifies-once, the full withdraw cycle (WS leg 1 →
+  reserve-excluded-from-available → confirm → idempotent re-confirm → reconcile-clean, asserting
+  the `kind='withdraw'` leg explicitly), withdraw-without-wallet → conflict, withdraw_confirm
+  field-mismatch → invalid, withdraw expiry (hold + exchange), the withdraw-hold-not-capturable
+  keeper, both cross-check freeze directions (deposit-orphan + withdraw-orphan), concurrent
+  same-id deposit → one credit, journal list + `since` filter, and cross-world RLS. Part A's
+  `tests/ledger.rs` (13) stays green after the `capture`/`release`/`expire_holds` changes.
+- **Money-concurrency flakiness check: 12/12 clean** on the exchange + ledger binaries (the
+  concurrent same-id deposit, the opposing-transfer storm, and the battery each run) — deadlock-
+  freedom after the three lock-ordering fixes confirmed empirically, not just argued.
+
+### Exit criteria status (Sprint 7 — now fully closed)
+
+| Criterion | Status |
+|---|---|
+| Concurrency battery green 100 consecutive runs | **PASS (strong)** — part A's battery + the new concurrent-same-id deposit ran clean 12/12 locally; the "100" is a CI/soak repeat, and the tests are deterministic-contention. |
+| Reconciliation catches an injected corruption | **PASS** (part A's balance freeze; part B adds the exchange cross-check, both freeze directions tested). |
+| Exchange protocol documented for the bridge author | **PASS** — `docs/opn-bridge-exchange.md` (normative: auth, deposit/withdraw/journal shapes, idempotency + replay + bank-ordering rules, freeze semantics). |
+
+### Reflection
+
+- **The seam-split paid a seventh time.** Ledger-core and exchange share only the transfer/hold
+  machinery (exchange *calls* it), so B was a complete reviewed slice on the committed base —
+  same dividend every sprint since 4.
+- **The adversarial pass earned its keep on the highest-stakes surface again.** Three lenses;
+  the conservation/isolation cores were *proved* clean, and the edges gave a money-creation path,
+  a half-enforced freeze (two lenses converged), a real race, a real deadlock, and a lying test —
+  none visible to 6 green happy-path tests. On a money exchange that is exactly the budgeted
+  verification ADR-1 buys, not polish.
+- **Root-cause over symptom held.** The withdraw-hold guard went into the two shared store fns
+  (every future caller protected); the frozen-system guard mirrors deposit's; the race fix is the
+  one-statement DO-UPDATE; the deadlock fix reorders the janitor so *both* paths agree.
+- **Design-doc latitude, not contradiction.** §10.5 left the exchange schema and mechanics to the
+  roadmap; I closed the currency home, the `hold_id` link, and the distinct-kinds cross-check in
+  code and logged them here rather than minting a CDR, since nothing contradicts the design.
+
+### Not committed / next session
+
+- **Sprint 7 (A+B) is complete and green but this B slice is untracked** on top of the committed
+  0–7A. First commit re-arms the drift gate (updated `Cmd`/`ClientFrame` bindings) — the
+  operator's call, as every sprint.
+- **Sprint 8 — Feed.** Depends on Sprint 4 (cursor, media attachment pattern), parallelizable with
+  the now-complete 6/7. The fan-out-on-read timeline is the next primitive; no v1 app consumes it,
+  but the primitive ships (OPN.md §14.5).
+- Still open, minor, none blocking: the multi-currency cross-check refinement + per-tenant exchange
+  HTTP rate limit (both Sprint-10 candidates, documented ceilings); the concurrent-duplicate
+  `internal` cosmetic corner (shared with part A's transfers_idem); online-member badging,
+  Bearer case-sensitivity, `identity.me` own-last-seen (all pre-existing).
+
+---
+
+## 2026-07-19 (earlier) — Sprint 7 **part A** (ledger: accounts/transfers/holds, deadlock-free transfer, hold FSM, capture/release, nightly reconciliation, hold-expiry, history): built, verified live; exchange (part B) deferred
 
 Sprint 7 has two shared-nothing halves, so it split the same way every sprint since 4 has:
 **(A)** the ledger core — the `accounts`/`transfers`/`holds` tables, the deadlock-free

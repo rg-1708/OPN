@@ -33,7 +33,7 @@ const AUTH_DEADLINE: Duration = Duration::from_secs(3);
 #[derive(Default)]
 pub struct PreauthCaps {
     global: AtomicU32,
-    per_ip: DashMap<IpAddr, u8>,
+    per_ip: DashMap<IpAddr, u32>,
 }
 
 impl PreauthCaps {
