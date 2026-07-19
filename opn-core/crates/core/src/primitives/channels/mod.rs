@@ -418,7 +418,9 @@ fn valid_emoji(emoji: &str) -> bool {
             .any(|c| c.is_ascii_control() || c.is_whitespace())
 }
 
-fn validate_body(body: &MessageBody) -> Result<(), Fail> {
+// pub: also driven by the `fuzz_client_frame` target (Sprint 9) — arbitrary
+// bodies must never panic here, only `Ok`/`Invalid`/`TooLarge`.
+pub fn validate_body(body: &MessageBody) -> Result<(), Fail> {
     let has_text = body.text.as_deref().is_some_and(|t| !t.is_empty());
     let has_media = body.media_ids.as_ref().is_some_and(|m| !m.is_empty());
     let has_gif = body.gif_url.as_deref().is_some_and(|g| !g.is_empty());

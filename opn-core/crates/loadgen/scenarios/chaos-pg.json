@@ -1,0 +1,10 @@
+{
+  "target_http": "http://127.0.0.1:8080",
+  "target_ws": "ws://127.0.0.1:8080/ws",
+  "api_key": "",
+  "connections": 2,
+  "duration_secs": 25,
+  "total_msgs_per_sec": 30,
+  "warmup_secs": 3,
+  "assert_error_acks": true
+}

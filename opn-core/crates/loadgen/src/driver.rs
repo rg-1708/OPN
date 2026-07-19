@@ -55,6 +55,10 @@ pub struct ConnConfig {
     pub period: Duration,
     pub typing_every: u64,
     pub read_every: u64,
+    /// Record every ok-acked send's seq into `ConnStats::acked_seqs` and carry
+    /// the channel id + token (for the kill9 chaos verifier). Off in every
+    /// perf/soak scenario — set only when `OPN_LOADGEN_ACK_JOURNAL` is present.
+    pub record_acks: bool,
 }
 
 /// Per-connection tallies, merged into the run summary. Latencies in
@@ -66,10 +70,27 @@ pub struct ConnStats {
     pub sends: u64,
     pub recvs: u64,
     pub rate_limited: u64,
+    /// Non-ok acks that are *not* rate-limits (internal/not_found/…). The
+    /// pg-restart drill's "error acks, not silence" signal: while its DB pool
+    /// can't reach Postgres, Core still acks each send an `internal` rather than
+    /// hanging, so a non-zero count is the proof the gap was answered, not silent.
+    pub error_acks: u64,
     pub durable_closes: u64,
     pub other_closes: u64,
     pub errors: u64,
     pub error_detail: Option<String>,
+    /// Seqs of every ok-acked `channels.send` on this connection — the kill9
+    /// chaos verifier's ground truth (roadmap Sprint 9 item 3). Only populated
+    /// when `ConnConfig::record_acks` is set, so the normal perf smoke and the
+    /// Sprint 10 soak pay nothing for it. Survives a mid-run disconnect because
+    /// the drive loop `break`s (not errors) on a dead socket, returning
+    /// `Ok(stats)` with the acks collected before the kill.
+    pub acked_seqs: Vec<i64>,
+    /// This connection's pair channel, set once setup completes.
+    pub channel_id: Option<Uuid>,
+    /// A member token for the channel (recording mode only), so the verifier can
+    /// resume-subscribe as a real member.
+    pub token: Option<String>,
 }
 
 impl ConnStats {
@@ -167,8 +188,13 @@ async fn drive(cfg: ConnConfig) -> Result<ConnStats> {
     }
 
     // ── drive ─────────────────────────────────────────────────────────────
+    let record_acks = cfg.record_acks;
     let (mut write, mut read) = ws.split();
-    let mut stats = ConnStats::default();
+    let mut stats = ConnStats {
+        channel_id: Some(channel_id),
+        token: record_acks.then(|| cfg.token.clone()),
+        ..Default::default()
+    };
     let mut pending: HashMap<u64, Instant> = HashMap::new();
     let mut last_seen_seq: i64 = 0;
     let mut send_count: u64 = 0;
@@ -232,7 +258,7 @@ async fn drive(cfg: ConnConfig) -> Result<ConnStats> {
                 match frame {
                     None | Some(Err(_)) => break,
                     Some(Ok(Message::Text(t))) => {
-                        handle_incoming(&t, cfg.char_id, cfg.epoch, &mut pending, &mut last_seen_seq, &mut stats);
+                        handle_incoming(&t, cfg.char_id, cfg.epoch, &mut pending, &mut last_seen_seq, &mut stats, record_acks);
                     }
                     Some(Ok(Message::Close(c))) => {
                         match c.map(|f| u16::from(f.code)) {
@@ -259,22 +285,42 @@ fn handle_incoming(
     pending: &mut HashMap<u64, Instant>,
     last_seen_seq: &mut i64,
     stats: &mut ConnStats,
+    record_acks: bool,
 ) {
     let Ok(msg) = serde_json::from_str::<ServerMsg>(text) else {
         return; // unknown frame shape — not our contract's problem to measure
     };
     match msg {
         ServerMsg::Ack {
-            reply_to, ok, err, ..
+            reply_to,
+            ok,
+            payload,
+            err,
         } => {
             // Only our `channels.send` frames are tracked in `pending`; typing
             // and mark_read acks fall through here and are ignored.
             if let Some(sent) = pending.remove(&reply_to) {
                 if ok {
                     stats.ack_rtts_us.push(sent.elapsed().as_micros() as u64);
+                    // Persist-then-ack means an ok ack ⇒ the row is committed;
+                    // record its seq as the kill9 verifier's must-survive set.
+                    if record_acks {
+                        if let Some(seq) = payload
+                            .as_ref()
+                            .and_then(|p| p.get("seq"))
+                            .and_then(|s| s.as_i64())
+                        {
+                            stats.acked_seqs.push(seq);
+                        }
+                    }
                 } else if matches!(err, Some(e) if matches!(e.code, contracts::ErrCode::RateLimited))
                 {
                     stats.rate_limited += 1;
+                } else {
+                    // Any other non-ok ack (internal, not_found, …). During the
+                    // pg-restart drill these are the DB-outage acks — Core
+                    // answering rather than going silent.
+                    stats.error_acks += 1;
                 }
             }
         }
@@ -308,8 +354,9 @@ fn text_frame(frame: &ClientFrame) -> Result<Message> {
     Ok(Message::Text(serde_json::to_string(frame)?.into()))
 }
 
-/// Send a `Cmd` as a `ClientFrame` on the combined (pre-split) stream.
-async fn send(ws: &mut Ws, id: u64, cmd: Cmd) -> Result<()> {
+/// Send a `Cmd` as a `ClientFrame` on the combined (pre-split) stream. Shared
+/// with the `--verify-resume` path (`verify.rs`).
+pub(crate) async fn send(ws: &mut Ws, id: u64, cmd: Cmd) -> Result<()> {
     let frame = ClientFrame { id, cmd };
     ws.send(text_frame(&frame)?).await.context("ws send")?;
     Ok(())
@@ -317,8 +364,8 @@ async fn send(ws: &mut Ws, id: u64, cmd: Cmd) -> Result<()> {
 
 /// Read frames until the ack with `reply_to == want`, skipping pushes and
 /// unrelated acks. 5 s timeout — a missing setup ack is a hard error, not a
-/// hang.
-async fn await_ack(ws: &mut Ws, want: u64) -> Result<(bool, Option<serde_json::Value>)> {
+/// hang. Shared with the `--verify-resume` path (`verify.rs`).
+pub(crate) async fn await_ack(ws: &mut Ws, want: u64) -> Result<(bool, Option<serde_json::Value>)> {
     let fut = async {
         loop {
             match ws.next().await {
@@ -345,4 +392,52 @@ async fn await_ack(ws: &mut Ws, want: u64) -> Result<(bool, Option<serde_json::V
     timeout(Duration::from_secs(5), fut)
         .await
         .context("timed out awaiting ack")?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Feed one server frame (with `reply_to` 7 pre-registered as a tracked
+    /// send) through the classifier and return the resulting tallies.
+    fn classify(text: &str) -> ConnStats {
+        let mut pending = HashMap::new();
+        pending.insert(7, Instant::now());
+        let mut stats = ConnStats::default();
+        let mut seen = 0i64;
+        handle_incoming(
+            text,
+            Uuid::nil(),
+            Instant::now(),
+            &mut pending,
+            &mut seen,
+            &mut stats,
+            false,
+        );
+        stats
+    }
+
+    #[test]
+    fn internal_ack_is_an_error_ack_not_a_ratelimit() {
+        // The pg-restart gap's signal: a DB-outage `internal` ack.
+        let s = classify(r#"{"reply_to":7,"ok":false,"err":{"code":"internal","msg":"x"}}"#);
+        assert_eq!(s.error_acks, 1);
+        assert_eq!(s.rate_limited, 0);
+        assert!(s.ack_rtts_us.is_empty());
+    }
+
+    #[test]
+    fn rate_limited_ack_is_not_an_error_ack() {
+        let s = classify(r#"{"reply_to":7,"ok":false,"err":{"code":"rate_limited","msg":"x"}}"#);
+        assert_eq!(s.rate_limited, 1);
+        assert_eq!(s.error_acks, 0);
+    }
+
+    #[test]
+    fn ok_ack_is_neither() {
+        let s = classify(r#"{"reply_to":7,"ok":true,"payload":{"seq":3}}"#);
+        assert_eq!(s.error_acks, 0);
+        assert_eq!(s.rate_limited, 0);
+        assert_eq!(s.ack_rtts_us.len(), 1);
+    }
 }

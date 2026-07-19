@@ -14,13 +14,18 @@
 
 mod driver;
 mod http;
+mod linkdrop;
+mod verify;
+mod xinstance;
 
+use std::collections::{BTreeSet, HashMap};
 use std::process::ExitCode;
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
 use tokio::sync::oneshot;
 use tokio::time::{Duration, Instant};
+use uuid::Uuid;
 
 use driver::{run_connection, ConnConfig, ConnStats, Pairing};
 
@@ -56,6 +61,10 @@ struct Scenario {
     /// CI gate: fail if any connection was closed 4409 (slow consumer).
     #[serde(default)]
     assert_no_durable_closes: bool,
+    /// Chaos gate (pg-restart drill): fail if the run saw zero error acks —
+    /// the "the DB-outage gap produced error acks, not silence" invariant.
+    #[serde(default)]
+    assert_error_acks: bool,
 }
 
 fn default_warmup() -> u64 {
@@ -74,9 +83,79 @@ async fn main() -> ExitCode {
 }
 
 async fn run() -> Result<ExitCode> {
-    let path = scenario_path()?;
-    let raw = std::fs::read_to_string(&path).with_context(|| format!("read scenario {path}"))?;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        // kill9 chaos verifier: resume every channel in the ack journal and
+        // assert no acked message was lost across the restart.
+        Some("--verify-resume") => {
+            let journal = args
+                .get(1)
+                .ok_or_else(|| anyhow!("--verify-resume needs <journal.json> <ws_url>"))?;
+            let ws = args
+                .get(2)
+                .ok_or_else(|| anyhow!("--verify-resume needs <journal.json> <ws_url>"))?;
+            verify::verify_resume(journal, ws).await
+        }
+        // redis-restart chaos checker: prove a message sent on Core A crosses to
+        // a subscriber on Core B before and after a Redis restart (pub/sub
+        // resubscribe), holding both connections open across the window.
+        Some("--xinstance") => {
+            let http = args
+                .get(1)
+                .ok_or_else(|| anyhow!("--xinstance needs <http> <ws_a> <ws_b> [settle_secs]"))?;
+            let ws_a = args
+                .get(2)
+                .ok_or_else(|| anyhow!("--xinstance needs <http> <ws_a> <ws_b> [settle_secs]"))?;
+            let ws_b = args
+                .get(3)
+                .ok_or_else(|| anyhow!("--xinstance needs <http> <ws_a> <ws_b> [settle_secs]"))?;
+            let settle = match args.get(4) {
+                Some(s) => s.parse().context("settle_secs must be a whole number")?,
+                None => 50,
+            };
+            xinstance::verify_xinstance(http, ws_a, ws_b, settle).await
+        }
+        // link-drop chaos checker: drive a call so the /link consumer gets
+        // set_targets, drop the link mid-call, reconnect, re-sync the active
+        // call over HTTP, and prove a subsequent accept reaches the new link.
+        Some("--link-drop") => {
+            let http = args
+                .get(1)
+                .ok_or_else(|| anyhow!("--link-drop needs <http> <ws> [drop_gap_secs]"))?;
+            let ws = args
+                .get(2)
+                .ok_or_else(|| anyhow!("--link-drop needs <http> <ws> [drop_gap_secs]"))?;
+            let gap = match args.get(3) {
+                Some(s) => s.parse().context("drop_gap_secs must be a whole number")?,
+                None => 3,
+            };
+            linkdrop::verify_linkdrop(http, ws, gap).await
+        }
+        Some("--scenario") => {
+            let path = args
+                .get(1)
+                .ok_or_else(|| anyhow!("--scenario needs a path"))?;
+            run_scenario(path).await
+        }
+        _ => bail!(
+            "usage: opn-loadgen --scenario <path.json> \
+             | --verify-resume <journal.json> <ws_url> \
+             | --xinstance <http> <ws_a> <ws_b> [settle_secs] \
+             | --link-drop <http> <ws> [drop_gap_secs]"
+        ),
+    }
+}
+
+async fn run_scenario(path: &str) -> Result<ExitCode> {
+    let raw = std::fs::read_to_string(path).with_context(|| format!("read scenario {path}"))?;
     let mut scenario: Scenario = serde_json::from_str(&raw).context("parse scenario json")?;
+
+    // When set, every ok-acked send's seq is journaled here for the kill9 chaos
+    // verifier; unset (every perf/soak run) means zero recording overhead.
+    let journal_path = std::env::var("OPN_LOADGEN_ACK_JOURNAL")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let record_acks = journal_path.is_some();
 
     if let Ok(key) = std::env::var("OPN_LOADGEN_API_KEY") {
         if !key.is_empty() {
@@ -135,6 +214,7 @@ async fn run() -> Result<ExitCode> {
             period,
             typing_every: scenario.typing_every,
             read_every: scenario.read_every,
+            record_acks,
         };
         handles.push(tokio::spawn(run_connection(base(
             left.token,
@@ -152,20 +232,49 @@ async fn run() -> Result<ExitCode> {
     }
 
     let results = futures_util::future::join_all(handles).await;
+
+    // Write the ack journal (borrow) before merge consumes `results`.
+    if let Some(path) = &journal_path {
+        write_journal(path, &results)?;
+    }
+
     let summary = Summary::merge(results);
     summary.report(&scenario);
 
     Ok(summary.exit_code(&scenario))
 }
 
-fn scenario_path() -> Result<String> {
-    let mut args = std::env::args().skip(1);
-    match args.next().as_deref() {
-        Some("--scenario") => args
-            .next()
-            .ok_or_else(|| anyhow!("--scenario needs a path")),
-        _ => bail!("usage: opn-loadgen --scenario <path.json>"),
+/// Collapse per-connection acked seqs into one entry per channel (both pair
+/// members send to the same channel; union their seqs, keep one member token)
+/// and write the kill9 verifier's ground-truth journal.
+fn write_journal(path: &str, results: &[Result<ConnStats, tokio::task::JoinError>]) -> Result<()> {
+    let mut by_channel: HashMap<Uuid, (String, BTreeSet<i64>)> = HashMap::new();
+    for r in results.iter().flatten() {
+        if let (Some(cid), Some(tok)) = (r.channel_id, r.token.as_ref()) {
+            let e = by_channel
+                .entry(cid)
+                .or_insert_with(|| (tok.clone(), BTreeSet::new()));
+            e.1.extend(r.acked_seqs.iter().copied());
+        }
     }
+    let total: usize = by_channel.values().map(|(_, s)| s.len()).sum();
+    let entries: Vec<_> = by_channel
+        .into_iter()
+        .map(|(cid, (tok, seqs))| {
+            serde_json::json!({
+                "channel_id": cid,
+                "token": tok,
+                "acked_seqs": seqs.into_iter().collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    std::fs::write(path, serde_json::to_string(&entries)?)
+        .with_context(|| format!("write ack journal {path}"))?;
+    eprintln!(
+        "loadgen: wrote ack journal — {} channel(s), {total} acked seq(s) -> {path}",
+        entries.len()
+    );
+    Ok(())
 }
 
 fn validate(s: &Scenario) -> Result<()> {
@@ -195,6 +304,7 @@ struct Summary {
     sends: u64,
     recvs: u64,
     rate_limited: u64,
+    error_acks: u64,
     durable_closes: u64,
     other_closes: u64,
     errors: u64,
@@ -225,6 +335,7 @@ impl Summary {
                     all.sends += s.sends;
                     all.recvs += s.recvs;
                     all.rate_limited += s.rate_limited;
+                    all.error_acks += s.error_acks;
                     all.durable_closes += s.durable_closes;
                     all.other_closes += s.other_closes;
                     all.errors += s.errors;
@@ -245,6 +356,7 @@ impl Summary {
             sends: all.sends,
             recvs: all.recvs,
             rate_limited: all.rate_limited,
+            error_acks: all.error_acks,
             durable_closes: all.durable_closes,
             other_closes: all.other_closes,
             errors: all.errors,
@@ -261,6 +373,7 @@ impl Summary {
             "sends": self.sends,
             "recvs": self.recvs,
             "rate_limited": self.rate_limited,
+            "error_acks": self.error_acks,
             "durable_closes": self.durable_closes,
             "other_closes": self.other_closes,
             "errors": self.errors,
@@ -288,6 +401,7 @@ impl Summary {
             self.delivery.p50_ms, self.delivery.p99_ms, self.delivery.max_ms, self.delivery.count
         );
         eprintln!("rate_limited    {}", self.rate_limited);
+        eprintln!("error_acks      {}", self.error_acks);
         eprintln!(
             "closes          durable {}  other {}",
             self.durable_closes, self.other_closes
@@ -324,6 +438,13 @@ impl Summary {
                 );
                 failed = true;
             }
+        }
+        if scenario.assert_error_acks && self.error_acks == 0 {
+            eprintln!(
+                "loadgen: FAIL — assert_error_acks set but 0 error acks seen \
+                 (the DB-outage gap should have produced error acks, not silence)"
+            );
+            failed = true;
         }
         if failed {
             ExitCode::from(1)

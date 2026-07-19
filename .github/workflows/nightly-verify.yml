@@ -1,0 +1,75 @@
+name: Nightly verify
+
+# The generative + fuzz half of Sprint 9 (§15). Both are too slow for push/PR:
+# the property suites run 256 cases against real Postgres, and each fuzz target
+# burns 5 minutes. Nightly schedule + manual dispatch only. The in-suite proptest
+# run (16 cases) already gates every push via the normal `test` job in ci.yml.
+on:
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+jobs:
+  # Property suites at the nightly case count (roadmap Sprint 9 item 1). Real
+  # Postgres + Redis + MinIO, exactly the `test` job's stack and env.
+  proptest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: opn-core
+    env:
+      DATABASE_URL: postgres://opn_migrate:opn@localhost:5432/opn
+      OPN_MIGRATE_DATABASE_URL: postgres://opn_migrate:opn@localhost:5432/opn
+      REDIS_URL: redis://localhost:6379
+      S3_ENDPOINT: http://localhost:9000
+      S3_BUCKET: opn
+      S3_KEY: opn
+      S3_SECRET: opnsecret
+      OPN_JWT_SECRET: ci-secret
+      OPN_BIND: 127.0.0.1:8080
+      OPN_METRICS_BIND: 127.0.0.1:9090
+      PROPTEST_CASES: '256'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: opn-core
+      - run: docker compose -f docker-compose.dev.yml up -d --wait postgres redis minio
+      - run: docker compose -f docker-compose.dev.yml run --rm createbucket
+      - run: cargo test --test prop_fsm --test prop_cursor --test prop_ledger --test prop_channels
+      - if: always()
+        run: docker compose -f docker-compose.dev.yml down
+
+  # cargo-fuzz targets (roadmap Sprint 9 item 2): 5 min per target. Nightly Rust
+  # + libFuzzer; the `fuzz/` crate is its own workspace so the sanitizer build
+  # never touches the stable workspace. Committed corpus is the starting seed;
+  # a crash writes an artifact and fails the job (a crash IS the bug, §15).
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [fuzz_client_frame, fuzz_link_hello, fuzz_cursor_decode]
+    defaults:
+      run:
+        working-directory: opn-core
+    steps:
+      - uses: actions/checkout@v4
+      # `+nightly` (used below) overrides opn-core/rust-toolchain.toml's stable
+      # pin — cargo-fuzz requires nightly's sanitizer support.
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: opn-core/fuzz
+      - run: cargo +nightly install cargo-fuzz --locked
+      - name: Fuzz ${{ matrix.target }}
+        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=300 -timeout=10
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: opn-core/fuzz/artifacts

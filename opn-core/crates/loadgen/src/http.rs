@@ -85,6 +85,45 @@ pub async fn mint(host: &str, api_key: &str, framework_ref: &str) -> Result<Mint
     })
 }
 
+/// `GET {path}` against `host` (`ip:port`, no scheme) with the tenant API key,
+/// returning the parsed JSON body. Used by the link-drop drill for the
+/// `/v1/tenants/self/calls/active` re-sync read. Same hand-rolled one-shot shape
+/// as `mint` (HTTP/1.1 + `Connection: close`).
+pub async fn get(host: &str, api_key: &str, path: &str) -> Result<Value> {
+    let req = format!(
+        "GET {path} HTTP/1.1\r\n\
+         Host: {host}\r\n\
+         Authorization: Bearer {api_key}\r\n\
+         Connection: close\r\n\
+         \r\n",
+    );
+
+    let mut stream = TcpStream::connect(host)
+        .await
+        .with_context(|| format!("connect {host}"))?;
+    stream
+        .write_all(req.as_bytes())
+        .await
+        .context("write request")?;
+    let mut raw = Vec::new();
+    stream
+        .read_to_end(&mut raw)
+        .await
+        .context("read response")?;
+
+    let text = String::from_utf8_lossy(&raw);
+    let sep = text
+        .find("\r\n\r\n")
+        .ok_or_else(|| anyhow!("malformed response: no header terminator"))?;
+    let (head, rest) = (&text[..sep], text[sep + 4..].trim());
+
+    let status = head.lines().next().unwrap_or("");
+    if !status.contains(" 200 ") {
+        bail!("GET {path} failed: {status} / {rest}");
+    }
+    serde_json::from_str(rest).with_context(|| format!("parse GET {path} json"))
+}
+
 #[cfg(test)]
 mod tests {
     // The header/body split is the one fiddly bit of the hand-rolled client;

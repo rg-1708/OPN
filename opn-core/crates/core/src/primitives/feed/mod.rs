@@ -416,7 +416,9 @@ async fn active_account(
 /// so a null-bodied post (which the content check waves through when media is
 /// attached) would hit the DB constraint as an `internal`, not a clean
 /// `invalid`. Reject it at the boundary; a media-only post sends `{}`.
-fn validate_doc(body: &Value) -> Result<(), Fail> {
+// pub: also driven by the `fuzz_client_frame` target (Sprint 9) — arbitrary
+// docs must never panic here, only `Ok`/`Invalid`/`TooLarge`.
+pub fn validate_doc(body: &Value) -> Result<(), Fail> {
     if body.is_null() {
         return Err(Fail::Code(ErrCode::Invalid));
     }

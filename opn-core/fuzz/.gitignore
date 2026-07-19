@@ -1,0 +1,5 @@
+target
+artifacts
+coverage
+Cargo.lock
+# corpus/ is committed on purpose (roadmap Sprint 9: "corpus committed").

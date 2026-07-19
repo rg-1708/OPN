@@ -1,0 +1,44 @@
+# cargo-fuzz crate (roadmap Sprint 9 item 2). Its own workspace so the
+# sanitizer/nightly build never pulls into the stable workspace next door.
+[package]
+name = "opn-core-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+contracts = { path = "../crates/contracts" }
+opn-core = { path = "../crates/core" }
+
+[workspace]
+
+# Keep a little debug info so a crash backtrace is legible; the sanitizer wants
+# release-level opt on the code under test.
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "fuzz_client_frame"
+path = "fuzz_targets/fuzz_client_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_link_hello"
+path = "fuzz_targets/fuzz_link_hello.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_cursor_decode"
+path = "fuzz_targets/fuzz_cursor_decode.rs"
+test = false
+doc = false
+bench = false

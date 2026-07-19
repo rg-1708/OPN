@@ -18,3 +18,28 @@ lint:
 
 ts:
     cargo run -p contracts --bin export_ts
+
+# Smoke every cargo-fuzz target for `secs` each (roadmap Sprint 9 item 2).
+# Needs nightly Rust + cargo-fuzz (`cargo +nightly install cargo-fuzz`).
+# `just fuzz 300` = the CI 5-min-per-target burn; default 60 for a quick local
+# pass. Committed corpus seeds each run; new coverage is written back to it.
+fuzz secs="60":
+    cargo +nightly fuzz run fuzz_client_frame -- -max_total_time={{secs}}
+    cargo +nightly fuzz run fuzz_link_hello -- -max_total_time={{secs}}
+    cargo +nightly fuzz run fuzz_cursor_decode -- -max_total_time={{secs}}
+
+# The generative property suites at full case count (roadmap Sprint 9 exit
+# criterion: "green at 1024 cases locally"). Real Postgres; ~minutes.
+proptest cases="1024": dev
+    DATABASE_URL=${OPN_MIGRATE_DATABASE_URL} PROPTEST_CASES={{cases}} cargo test --test prop_fsm --test prop_cursor --test prop_ledger --test prop_channels
+
+# Sprint 9 chaos drills (item 3): crash/restart faults, each asserting a
+# delivery guarantee by exit code. Orchestrates its own compose stack + release
+# Core, so run the whole thing under the docker group on the dev host:
+#   sg docker -c 'just chaos'
+# kill9-mid-send + pg-restart + redis-restart exist; link-drop extends this list.
+chaos:
+    bash chaos/kill9-mid-send.sh
+    bash chaos/pg-restart.sh
+    bash chaos/redis-restart.sh
+    bash chaos/link-drop.sh
