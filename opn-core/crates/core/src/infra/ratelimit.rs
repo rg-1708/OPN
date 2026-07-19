@@ -88,6 +88,13 @@ pub fn class_of(cmd: &contracts::Cmd) -> Class {
         | Cmd::CallsHangup { .. }
         | Cmd::CallsSignal { .. }
         | Cmd::NotifyClear => Class::Social,
+        // Money movement (§12): the tight Money bucket (1/s, burst 2) — the class
+        // it was added for. Transfers, holds, captures, releases all move or
+        // reserve funds; a low ceiling is correct.
+        Cmd::LedgerTransfer { .. }
+        | Cmd::LedgerHold { .. }
+        | Cmd::LedgerCapture { .. }
+        | Cmd::LedgerRelease { .. } => Class::Money,
         // Issuing a presigned upload signs policies and reserves a row — the
         // costliest command that isn't the hot path. Tight budget (§12).
         Cmd::MediaRequestUpload { .. } => Class::Expensive,

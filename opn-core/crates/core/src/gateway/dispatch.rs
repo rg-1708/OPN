@@ -17,7 +17,7 @@ use super::topic::TopicKind;
 use crate::infra::auth::mint_jwt;
 use crate::infra::cursor;
 use crate::infra::ratelimit::class_of;
-use crate::primitives::{calls, channels, directory, identity, media, notify, Fail};
+use crate::primitives::{calls, channels, directory, identity, ledger, media, notify, Fail};
 use crate::state::AppState;
 
 /// Handles one parsed frame, returns the ack. Never panics, never closes —
@@ -398,6 +398,29 @@ async fn run(
             Ok(None)
         }
 
+        Cmd::LedgerTransfer {
+            from_account,
+            to_account,
+            amount,
+            client_uuid,
+        } => Ok(Some(
+            ledger::transfer(state, who, from_account, to_account, amount, client_uuid).await?,
+        )),
+        Cmd::LedgerHold {
+            account,
+            amount,
+            expires_in_secs,
+        } => Ok(Some(
+            ledger::hold(state, who, account, amount, expires_in_secs).await?,
+        )),
+        Cmd::LedgerCapture { hold_id, to } => {
+            Ok(Some(ledger::capture(state, who, hold_id, to).await?))
+        }
+        Cmd::LedgerRelease { hold_id } => {
+            ledger::release(state, who, hold_id).await?;
+            Ok(None)
+        }
+
         Cmd::NotifySeen { ids } => {
             notify::seen(&state.pg, who, &ids).await?;
             Ok(None)
@@ -451,6 +474,10 @@ fn wire_name(cmd: &Cmd) -> &'static str {
         Cmd::CallsDecline { .. } => "calls.decline",
         Cmd::CallsHangup { .. } => "calls.hangup",
         Cmd::CallsSignal { .. } => "calls.signal",
+        Cmd::LedgerTransfer { .. } => "ledger.transfer",
+        Cmd::LedgerHold { .. } => "ledger.hold",
+        Cmd::LedgerCapture { .. } => "ledger.capture",
+        Cmd::LedgerRelease { .. } => "ledger.release",
         Cmd::NotifySeen { .. } => "notify.seen",
         Cmd::NotifyClear => "notify.clear",
     }

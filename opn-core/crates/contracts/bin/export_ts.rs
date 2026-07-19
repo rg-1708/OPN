@@ -32,5 +32,7 @@ fn main() {
     // row — neither rides the Cmd/Evt graph (VoiceAction does, via calls.voice).
     contracts::LinkHello::export_all_to(dir).expect("export LinkHello");
     contracts::ActiveCall::export_all_to(dir).expect("export ActiveCall");
+    // ledger (§10.5): the history row rides HTTP, not the Cmd/Evt graph.
+    contracts::TransferItem::export_all_to(dir).expect("export TransferItem");
     println!("bindings written to {dir}");
 }

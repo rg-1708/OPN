@@ -306,6 +306,25 @@ pub struct CallParticipant {
     pub state: CallParticipantState,
 }
 
+// ── ledger (OPN-CORE.md §10.5) ────────────────────────────────────────────────
+
+/// One transfer in a `GET /v1/ledger/history` page (§10.5). Raw `from`/`to`
+/// account ids + amount; the client owns its own account ids and renders
+/// direction from them. `kind` is `transfer` (a `ledger.transfer`) or `capture`
+/// (a settled hold). Never carries a balance — history is the journal, not a
+/// running total.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TransferItem {
+    pub id: Uuid,
+    pub from_account: Uuid,
+    pub to_account: Uuid,
+    #[ts(type = "number")]
+    pub amount: i64,
+    pub kind: String,
+    pub created_at: String,
+}
+
 // ── tenant link (OPN-CORE.md §5) ──────────────────────────────────────────────
 
 /// Voice-target action on the tenant link (§5, §10.4): `set_targets` names the

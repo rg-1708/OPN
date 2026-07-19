@@ -588,6 +588,64 @@ fn link_hello_shape() {
     assert_eq!(back.contracts_version, "0.1.0");
 }
 
+// ── ledger (Sprint 7 part A, §10.5) ──────────────────────────────────────────
+
+#[test]
+fn client_frame_ledger_transfer() {
+    roundtrip(
+        &ClientFrame {
+            id: 60,
+            cmd: Cmd::LedgerTransfer {
+                from_account: u("50"),
+                to_account: u("51"),
+                amount: 250,
+                client_uuid: u("52"),
+            },
+        },
+        r#"{"id":60,"cmd":"ledger.transfer","payload":{"from_account":"0198c5b6-0000-7000-8000-000000000050","to_account":"0198c5b6-0000-7000-8000-000000000051","amount":250,"client_uuid":"0198c5b6-0000-7000-8000-000000000052"}}"#,
+    );
+}
+
+#[test]
+fn client_frame_ledger_hold() {
+    roundtrip(
+        &ClientFrame {
+            id: 61,
+            cmd: Cmd::LedgerHold {
+                account: u("50"),
+                amount: 100,
+                expires_in_secs: 3600,
+            },
+        },
+        r#"{"id":61,"cmd":"ledger.hold","payload":{"account":"0198c5b6-0000-7000-8000-000000000050","amount":100,"expires_in_secs":3600}}"#,
+    );
+}
+
+#[test]
+fn client_frame_ledger_capture() {
+    roundtrip(
+        &ClientFrame {
+            id: 62,
+            cmd: Cmd::LedgerCapture {
+                hold_id: u("53"),
+                to: u("51"),
+            },
+        },
+        r#"{"id":62,"cmd":"ledger.capture","payload":{"hold_id":"0198c5b6-0000-7000-8000-000000000053","to":"0198c5b6-0000-7000-8000-000000000051"}}"#,
+    );
+}
+
+#[test]
+fn client_frame_ledger_release() {
+    roundtrip(
+        &ClientFrame {
+            id: 63,
+            cmd: Cmd::LedgerRelease { hold_id: u("53") },
+        },
+        r#"{"id":63,"cmd":"ledger.release","payload":{"hold_id":"0198c5b6-0000-7000-8000-000000000053"}}"#,
+    );
+}
+
 // ── notify (Sprint 3) ────────────────────────────────────────────────────────
 
 #[test]

@@ -69,6 +69,12 @@ fn every_cmd_names_its_covering_test() {
             Cmd::CallsDecline { .. } => "calls::decline_ends_or_continues",
             Cmd::CallsHangup { .. } => "calls::full_lifecycle_start_accept_signal_hangup",
             Cmd::CallsSignal { .. } => "calls::signal_relay_and_authz",
+            Cmd::LedgerTransfer { .. } => {
+                "ledger::transfer_happy_insufficient_frozen_missing, ledger::concurrency_battery_conserves_and_reconciles"
+            }
+            Cmd::LedgerHold { .. } => "ledger::hold_capture_release_lifecycle",
+            Cmd::LedgerCapture { .. } => "ledger::hold_capture_release_lifecycle",
+            Cmd::LedgerRelease { .. } => "ledger::hold_capture_release_lifecycle",
             Cmd::NotifySeen { .. } => "notify::seen_marks_rows",
             Cmd::NotifyClear => "notify::clear_empties_inbox",
         }

@@ -8,6 +8,7 @@ pub mod calls;
 pub mod channels;
 pub mod directory;
 pub mod identity;
+pub mod ledger;
 pub mod media;
 pub mod notify;
 

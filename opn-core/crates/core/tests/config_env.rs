@@ -30,6 +30,17 @@ fn missing_var_error_names_the_var() {
     let cfg = Config::from_env().expect("all vars set");
     assert_eq!(cfg.session_ttl_secs, 600, "documented default");
     assert_eq!(cfg.replicas, 1, "documented default");
+    assert_eq!(cfg.reconcile_hour, 3, "documented default");
+
+    // An out-of-range reconcile hour must fail fast, not silently disable the
+    // corruption detector (§10.5, adversarial review Sprint 7A).
+    std::env::set_var("OPN_RECONCILE_HOUR", "24");
+    let err = Config::from_env().expect_err("hour 24 is invalid");
+    assert!(
+        format!("{err:#}").contains("OPN_RECONCILE_HOUR"),
+        "out-of-range reconcile hour must be rejected, got: {err:#}"
+    );
+    std::env::remove_var("OPN_RECONCILE_HOUR");
 
     for (missing, _) in ALL {
         for (k, v) in ALL {

@@ -12,6 +12,7 @@ use std::time::Duration;
 use anyhow::Result;
 use metrics::counter;
 use sqlx::PgPool;
+use time::OffsetDateTime;
 use tokio::time::{interval, MissedTickBehavior};
 use tracing::{debug, error, info_span, Instrument};
 use uuid::Uuid;
@@ -32,6 +33,8 @@ pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
             run_task("listings_expire", listings_expire(&state.pg)).await;
             run_task("calls_reap", calls_reap(&state)).await;
             run_task("calls_reap_orphaned", calls_reap_orphaned(&state)).await;
+            run_task("ledger_expire_holds", ledger_expire_holds(&state)).await;
+            run_task("ledger_reconcile", ledger_reconcile(&state)).await;
             // In-process, no DB: buckets idle > 10 min go away (§12).
             run_task("ratelimit_sweep", async { Ok(state.limits.sweep_idle()) }).await;
         }
@@ -187,6 +190,59 @@ async fn calls_reap_orphaned(state: &AppState) -> Result<u64> {
             crate::primitives::calls::publish_snapshot(state, world_id, snap).await;
         }
         total += snaps.len() as u64;
+    }
+    Ok(total)
+}
+
+/// Releases expired ledger holds across every world (§10.5 item 6): a `held`
+/// hold past its expiry auto-releases, and its character owner gets a `silent`
+/// notify. Per-world walk (it notifies after the SQL), like the media/calls
+/// sweeps; the store fn takes the per-task advisory lock.
+async fn ledger_expire_holds(state: &AppState) -> Result<u64> {
+    let world_ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM worlds")
+        .fetch_all(&state.pg)
+        .await?;
+    let mut total = 0u64;
+    for world_id in world_ids {
+        let released = crate::primitives::ledger::store::expire_holds(&state.pg, world_id).await?;
+        for (owner, amount) in &released {
+            let n = crate::primitives::notify::Notification {
+                app_id: "wallet".into(),
+                kind: "hold_expired".into(),
+                class: contracts::NotifyClass::Silent,
+                payload: serde_json::json!({ "amount": amount }),
+            };
+            if let Err(e) =
+                crate::primitives::notify::route(state, world_id, *owner, n, false).await
+            {
+                error!(error = ?e, "ledger hold-expiry notify failed");
+            }
+        }
+        total += released.len() as u64;
+    }
+    Ok(total)
+}
+
+/// Nightly ledger reconciliation across every world (§10.5 item 7): recompute
+/// each account's balance from its transfers and freeze any that drifted (silent
+/// corruption → a detected freeze within a day). Hour-gated to the configured UTC
+/// hour; it still fires every 30 s within that hour, but the freeze is idempotent
+/// (the `frozen_at IS NULL` guard) so re-runs re-stamp nothing.
+///
+/// ponytail: recomputes every account ~120× during the reconcile hour. Fine at
+/// v1 account counts; add a "last reconciled today" guard column if the recompute
+/// ever grows expensive.
+async fn ledger_reconcile(state: &AppState) -> Result<u64> {
+    if OffsetDateTime::now_utc().hour() as u32 != state.cfg.reconcile_hour {
+        return Ok(0);
+    }
+    let world_ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM worlds")
+        .fetch_all(&state.pg)
+        .await?;
+    let mut total = 0u64;
+    for world_id in world_ids {
+        let frozen = crate::primitives::ledger::store::reconcile(&state.pg, world_id).await?;
+        total += frozen.len() as u64;
     }
     Ok(total)
 }

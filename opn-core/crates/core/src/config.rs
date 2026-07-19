@@ -41,6 +41,10 @@ pub struct Config {
     /// defaults to `[]` (P2P/STUN-less). Parsed once at startup — malformed JSON
     /// aborts.
     pub ice_servers: serde_json::Value,
+    /// Hour-of-day (UTC, 0..=23) the nightly ledger reconciliation runs (§10.5).
+    /// The janitor still ticks every 30 s; this gates the per-account recompute to
+    /// one hour a day. Default 3 (03:00 UTC).
+    pub reconcile_hour: u32,
 }
 
 fn req(name: &str) -> Result<String> {
@@ -68,6 +72,14 @@ where
 
 impl Config {
     pub fn from_env() -> Result<Config> {
+        // Validate the reconcile hour up front: `hour()` only ever returns 0..=23,
+        // so a value ≥ 24 (a typo, or "24" meaning midnight) would make the gate
+        // never fire — silently disabling the ONLY silent-corruption detector.
+        // Fail fast instead (§10.5, adversarial review Sprint 7A).
+        let reconcile_hour = opt("OPN_RECONCILE_HOUR", 3)?;
+        if reconcile_hour > 23 {
+            anyhow::bail!("OPN_RECONCILE_HOUR must be 0..=23, got {reconcile_hour}");
+        }
         Ok(Config {
             bind: parse("OPN_BIND", req("OPN_BIND")?)?,
             metrics_bind: parse("OPN_METRICS_BIND", req("OPN_METRICS_BIND")?)?,
@@ -96,6 +108,7 @@ impl Config {
                 Ok(v) => serde_json::from_str(&v).context("invalid JSON in OPN_ICE_SERVERS")?,
                 Err(_) => serde_json::json!([]),
             },
+            reconcile_hour,
         })
     }
 }

@@ -10,6 +10,7 @@ use crate::state::AppState;
 
 pub mod auth;
 pub mod channels;
+pub mod ledger;
 pub mod media;
 pub mod notify;
 pub mod tenant;
@@ -24,6 +25,7 @@ pub fn app_router(state: AppState) -> Router {
         .route("/v1/notify/inbox", get(notify::inbox))
         .route("/v1/media", get(media::list))
         .route("/v1/channels/{id}/messages", get(channels::history))
+        .route("/v1/ledger/history", get(ledger::history))
         .with_state(state)
 }
 

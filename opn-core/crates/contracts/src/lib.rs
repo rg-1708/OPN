@@ -18,5 +18,6 @@ pub use types::{
     ActiveCall, AppAccountInfo, CallKind, CallParticipant, CallParticipantState, CallSessionState,
     ChannelSummary, CharacterInfo, ContactItem, DeviceInfo, InboxItem, LinkHello, ListingItem,
     MePayload, MediaItem, MediaKind, MessageBody, MessageItem, MessagePreview, NotifyClass,
-    ReceiptKind, ResolveResult, SessionMintResponse, UploadTarget, UploadTicket, VoiceAction,
+    ReceiptKind, ResolveResult, SessionMintResponse, TransferItem, UploadTarget, UploadTicket,
+    VoiceAction,
 };

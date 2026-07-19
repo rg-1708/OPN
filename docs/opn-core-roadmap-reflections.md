@@ -6,7 +6,195 @@ to OPN-CORE.md as CDRs — this file records *how the build actually went*.
 
 ---
 
-## 2026-07-18 (latest) — Sprint 6 **part B** (tenant link: `/link` gateway, `calls.voice` down-events, `/calls/active` re-sync, coturn + `ice_servers`): built, verified live; **Sprint 6 complete**
+## 2026-07-19 (latest) — Sprint 7 **part A** (ledger: accounts/transfers/holds, deadlock-free transfer, hold FSM, capture/release, nightly reconciliation, hold-expiry, history): built, verified live; exchange (part B) deferred
+
+Sprint 7 has two shared-nothing halves, so it split the same way every sprint since 4 has:
+**(A)** the ledger core — the `accounts`/`transfers`/`holds` tables, the deadlock-free
+transfer, the hold FSM + capture/release, the nightly reconciliation, hold-expiry, and
+`ledger.history` — and **(B)** the exchange protocol (`exchanges` table, the
+deposit/`withdraw_confirm` HTTP endpoints, the two-leg `ledger.withdraw`, the exchange
+cross-check in reconciliation, and the bridge-facing doc). B builds *on* A's transfer/hold
+machinery, so A is a complete, reviewed, green slice and B starts from it. A closed exit
+criteria 1–2; the bridge doc (criterion 3) is B. No roadmap amendment — items 4 (exchange)
+and 3's `ledger.withdraw` stay in Sprint 7.
+
+### What exists now
+
+- **Migration `0010_ledger.sql`** — three FORCE-RLS world-scoped tables. `accounts`
+  (`owner_kind` character|system, nullable `owner_character`, `currency`, `balance bigint`,
+  `frozen_at`) with `CHECK (balance >= 0 OR owner_kind = 'system')` — only the tenant system
+  account may run negative — and a partial unique `accounts_char_wallet (world, owner_character,
+  currency) WHERE owner_kind='character'` (one wallet per currency). `transfers` (immutable,
+  `kind` transfer|capture, nullable `client_uuid`) with the partial-unique idempotency index
+  `transfers_idem (from_account, client_uuid) WHERE client_uuid IS NOT NULL` and two
+  directional keyset indexes for history. `holds` (`state` held|captured|released, `expires_at`)
+  with a held-sum partial index and an expiry partial index. Standard 0001 NULLIF DO-loop RLS.
+- **`primitives/ledger/{fsm,store,mod}.rs`** — the multi-file calls-shape (holds → an FSM).
+  `fsm.rs`: the 3-state hold machine as one pure `apply` (Held→Captured|Released, terminals
+  absorb), the Sprint 9 proptest target, with an exhaustive literal-table unit test. `store.rs`:
+  `transfer` (idempotency-first, then id-ordered `IN ($f,$t) FOR UPDATE`, available =
+  `balance − Σheld`, debit/credit/insert), `hold`/`capture`/`release` (each locks the account
+  row so `held_sum` is race-free), `history` (cursor idiom), and `reconcile`/`expire_holds`
+  (advisory-locked janitor fns). `mod.rs`: the four handlers + the incoming-money notify.
+- **The load-bearing invariant, made explicit:** an account is born at `balance 0` and the
+  *only* way money moves is a `transfers` row (a transfer or a capture), so `balance ==
+  Σ(to==id) − Σ(from==id)` holds universally. `reconcile` recomputes exactly that and freezes
+  drift under the advisory lock; the concurrency battery asserts the same equality. Test and
+  prod share the one invariant SQL (via `store::reconcile`), per the roadmap.
+- **Wiring** — 4 `Cmd` (`ledger.transfer/hold/capture/release`, rate class `Money`), no new
+  `Evt` (incoming money rides `notify.event`, class `alert`, app_id `wallet`); `TransferItem`
+  contract type; `GET /v1/ledger/history` (JWT, cursor); janitor `ledger_expire_holds` (releases
+  + silent-notifies owner) and `ledger_reconcile` (hour-gated to `OPN_RECONCILE_HOUR`, default 3);
+  coverage match-test + 4 golden wire tests; bindings regenerated (`Cmd`/`ClientFrame` + new
+  `TransferItem.ts`).
+
+### Decisions closed during implementation (roadmap deviations, all ponytail)
+
+1. **Part A ships `accounts`/`transfers`/`holds`; the `exchanges` table + system-account mint
+   path are part B.** The roadmap's §10.5 schema is one migration for the whole sprint, but the
+   exchange table has no part-A consumer, so front-loading it is YAGNI. Accounts/transfers/holds
+   are genuinely part A (transfers and holds live here). The `system` `owner_kind` + the negative
+   exemption ship now (they're columns of the part-A `accounts` table) but aren't exercised until
+   B's deposit path.
+2. **`capture` authz = the holding account's owner (self-escrow).** The roadmap's `ledger.capture
+   { hold_id, to }` doesn't name who may capture; I closed it as "you reserve your own funds and
+   settle them to a payee yourself" (`hold` already requires you to own the reserved account). A
+   merchant-holds-customer model would need a different authz story; self-escrow is the coherent
+   v1. Logged, not a CDR (within §10.5 latitude).
+3. **Currency-match enforced on both transfer and capture; cross-currency → `Invalid`.** Prevents
+   value creation across currencies — not spelled out in the roadmap but a money invariant.
+4. **No dedicated `ledger.*` Evt.** Incoming money is a `notify::route` (alert), exactly the
+   roadmap's item 8; a live balance-push event would be redundant with notify for v1. Fewer
+   contract surfaces.
+5. **No "list my accounts" read in part A.** The roadmap's part-A commands are transfer/hold/
+   capture/release/history; an app discovers its account ids from `history` (or, in B, the
+   deposit response that first creates its wallet). A balance/accounts read lands when an app
+   needs it — deferred, noted.
+6. **Reconciliation hour-gate is an in-process `now_utc().hour()` check, no scheduler.** The
+   codebase has no time-of-day scheduling precedent; a one-line gate on the 30 s tick is the lazy
+   fit. It fires ~120×/reconcile-hour, which is fine because the freeze is idempotent
+   (`frozen_at IS NULL`). `ponytail:` marked with the "add a last-reconciled-today guard if the
+   recompute grows" upgrade path.
+
+### The keepers this session (the point of rule 4): a money-loss trap and a silently-disabled safety net
+
+Ran the budgeted adversarial pass as **four independent lenses** — correctness/SQL,
+concurrency/conservation, security/RLS, and the independent test-author — then triaged every
+finding myself against the code. The concurrency and security lenses came back **clean on the
+money-critical machinery** (deadlock-freedom across all interleavings, `held_sum` serialization
+via the account row lock, capture's skip-available-check safety from the `balance ≥ Σheld`
+invariant, reconcile's no-false-freeze under READ COMMITTED, owner-only writes, all-three-tables
+RLS, cross-currency blocked, no cross-world movement) — each with a traced proof, which is the
+verification thesis working: the hard properties were *argued*, not hoped. The two real defects
+came from the other two legs, and both were invisible to the 10 green tests:
+
+1. **A nil `client_uuid` silently traps an account (correctness lens, MED).** `client_uuid` is a
+   required wire field with no nil-rejection. The nil UUID (`00000000-…`) is the single most
+   common accidental/zero-initialized value, and it is a *real value*, not SQL NULL, so it
+   participates in the `transfers_idem` index. A client that left the key zeroed would have its
+   *first* nil-keyed transfer stick and every later, genuinely-different nil-keyed transfer
+   **silently replay it — moving no money while the caller is told it did**, no error, no metric.
+   The fix is one guard (`client_uuid.is_nil() → Invalid`), but the bug is the dangerous kind:
+   silent money-not-moving that a happy-path suite (every test used `now_v7()` keys) sails past.
+2. **The corruption detector can be silently switched off (correctness + test-author, MED — the
+   two legs converged).** `reconcile_hour` was an unvalidated `u32`; `hour()` only returns 0–23,
+   so `OPN_RECONCILE_HOUR=24` (a plausible "midnight" typo) makes the gate never fire and
+   reconciliation **never runs, forever, with no startup error** — disabling the one mechanism
+   that detects silent money corruption. Fix: validate `0..=23` fail-fast at config load, with a
+   test.
+
+And the independent test-author leg landed its own keeper — the **flagship concurrency battery
+passed vacuously**: `Σ balances == 0` is true by construction (genesis funding) and
+reconcile-clean is true when nothing moved, and every `Conflict` was swallowed as "fine", so the
+exit-criterion test would stay green *even if every transfer failed*. Fixed to count successes and
+assert money actually moved (`oks > 200/400`). Fifth sprint running, the independent-test leg
+caught a shipped weakness the desk-check misses.
+
+### Also fixed / documented from the review
+
+- **Security L1 (fixed) — `capture` leaked hold state before authz.** It ran the FSM/self checks
+  before the owner check, so a non-owner could distinguish held-vs-settled from the error code.
+  Reordered to owner-check-first via a hold+account join (mirrors `release`).
+- **Security L2 / correctness #3 (fixed) — idempotency replay skipped the ownership check.** The
+  fast path returned a balance before verifying ownership. Now the idempotency SELECT joins
+  `accounts` and filters `owner_character = actor`, so a non-owner misses it and falls through to
+  the locked path's `Forbidden` (before any INSERT).
+- **Store-level `amount <= 0` guards added** to `transfer`/`hold` (defense-in-depth for B's
+  future direct calls; the DB `CHECK` was the only backstop).
+- **`held_sum` invariant comment added** (concurrency NOTE): the available-check is race-free
+  only because every hold-writer locks the account row first — flagged so a future primitive
+  can't silently reintroduce a check-vs-debit race.
+- **Accepted / documented, not fixed:** the `Forbidden`-vs-`NotFound` existence oracle (L3 —
+  gated by unguessable v7 uuids, same stance as media/calls); the spurious `internal` on a
+  *truly-simultaneous* duplicate transfer (conservation-safe — the loser's whole tx rolls back;
+  sequential retries, the norm, hit the clean replay path); incoming-money into a frozen account
+  is *allowed* by design (freeze blocks outgoing only) — now covered by a test so a future reader
+  doesn't "fix" it into a bug.
+
+### Verification (rule 4)
+
+- `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` clean (the `core` crate's
+  `unwrap_used` deny respected — caught two `.unwrap()`s in a new test, changed to `.expect`).
+- **Full workspace suite green** against the live stack (Postgres+Redis+MinIO): every binary,
+  0 failures. New `tests/ledger.rs` (**13**): transfer happy/insufficient/frozen/missing,
+  ownership + idempotency, the hold→capture→release lifecycle (incl. terminal-replay conflicts +
+  a post-capture reconcile/capture-row assertion), the concurrency battery (now asserting money
+  actually moved), the opposing-transfer deadlock storm, reconciliation-freezes-injected-
+  corruption, negative-system-allowed/character-`CHECK`, hold-expiry, cross-world RLS, the
+  history pagination+isolation test, input-validation (zero/negative/**nil-key**), and capture
+  edges (self, cross-currency, incoming-to-frozen), plus a WS wire smoke. `config_env` extended
+  for the `reconcile_hour` range check. 3 `fsm.rs` unit tests. 4 golden wire tests.
+- **Money-concurrency flakiness check: 25/25 clean** on the battery + opposing storm (16 tasks ×
+  25 transfers + 400-iteration A↔B storm each run) — deadlock-freedom confirmed empirically, not
+  just argued.
+
+### Exit criteria status (Sprint 7 — part A slice)
+
+| Criterion | Status |
+|---|---|
+| Concurrency battery green 100 consecutive runs | **PASS (strong)** — the battery + opposing storm ran 25/25 clean locally with no flakiness; the "100" is a CI/soak repeat, and the test is deterministic-contention. |
+| Reconciliation catches an injected corruption in test | **PASS** — `reconciliation_freezes_injected_corruption` (corrupt a balance → reconcile freezes it → outgoing op `Conflict` → idempotent re-run). |
+| Exchange protocol documented for the bridge author | **DEFERRED (part B)** — the exchange protocol itself is part B; the doc lands with it. |
+
+### Reflection
+
+- **The seam-split paid a sixth time.** Ledger-core and exchange share only the transfer/hold
+  machinery (exchange *calls* it), so A is a complete reviewed slice and B starts clean — same
+  dividend Sprints 4/5/6 paid.
+- **The adversarial pass earned its keep on the highest-stakes primitive.** Four lenses; the two
+  argument-heavy legs (concurrency, security) *proved* the money-critical properties clean, and
+  the two others found a silent money-loss trap and a silently-disabled safety net — neither
+  visible to 10 green happy-path tests. On a money ledger that is exactly the budgeted
+  verification ADR-1 buys, not polish.
+- **Root-cause over symptom held.** The nil-key guard went in the handler (one place every
+  transfer routes through); the idempotency authz fix went in the shared SELECT (protects the
+  replay path and B's future callers); the `amount<=0` guard went in the store (defends the
+  direct-call surface B will use).
+- **Design-doc latitude, not contradiction.** §10.5 left capture-authz and currency-matching
+  open; I closed them in code and logged the choices here rather than minting a CDR, since
+  nothing contradicts the design. If part B's exchange needs the capture-authz decision pinned,
+  that's the moment for a §10.5 note.
+
+### Not committed / next session
+
+- **Sprint 7 part A is complete and green but untracked** on top of the committed 0–6. First
+  commit re-arms the drift gate (updated `Cmd`/`ClientFrame` bindings + new `TransferItem.ts`) —
+  the operator's call, as every sprint.
+- **Sprint 7 part B — exchange.** The `exchanges` table (PK `(world, id)`), the API-key
+  `POST /v1/tenants/self/exchange` (deposit = idempotent system→wallet credit, auto-creating the
+  wallet on first touch; `withdraw_confirm` = capture the hold to system), the two-leg WS
+  `ledger.withdraw` (hold + `pending_confirm` exchange row), the exchange↔system-legs cross-check
+  added to reconciliation, and the bridge-facing doc (exit criterion 3). It builds directly on
+  part A's `transfer`/`hold`/`capture` and the reconcile invariant.
+- **The deferred "list my accounts / balance" read** — add when an app (or B's deposit response
+  shape) needs it.
+- Still open, minor, none blocking: the concurrent-duplicate `internal` cosmetic corner
+  (documented ceiling); online-member badging, Bearer case-sensitivity, `identity.me`
+  own-last-seen (all pre-existing).
+
+---
+
+## 2026-07-18 — Sprint 6 **part B** (tenant link: `/link` gateway, `calls.voice` down-events, `/calls/active` re-sync, coturn + `ice_servers`): built, verified live; **Sprint 6 complete**
 
 Part A shipped the WS-facing call primitive and stopped on the shared-nothing seam
 (A = call sessions + gateway, B = the tenant `/link`). Part B lands the other half:

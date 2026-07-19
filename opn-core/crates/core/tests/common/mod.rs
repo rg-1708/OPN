@@ -82,6 +82,7 @@ pub fn test_config() -> Config {
         preauth_per_ip_max: 5,
         heartbeat_secs: 30,
         ice_servers: serde_json::json!([]),
+        reconcile_hour: 3,
     }
 }
 

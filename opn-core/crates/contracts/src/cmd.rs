@@ -268,6 +268,43 @@ pub enum Cmd {
         payload: serde_json::Value,
     },
 
+    // ── ledger (§10.5) ───────────────────────────────────────────────────
+    /// Move `amount` from `from_account` to `to_account` (§10.5). `from_account`
+    /// must be the caller's; `client_uuid` is the idempotency key (a retry
+    /// returns the original ack and moves nothing). Ack `{ transfer_id, balance }`
+    /// where `balance` is the source's new balance.
+    #[serde(rename = "ledger.transfer")]
+    LedgerTransfer {
+        from_account: Uuid,
+        to_account: Uuid,
+        #[ts(type = "number")]
+        amount: i64,
+        client_uuid: Uuid,
+    },
+    /// Reserve `amount` on the caller's own `account` for `expires_in_secs`
+    /// (§10.5): held funds don't move but are excluded from available balance
+    /// until captured or released. Ack `{ hold_id }`.
+    #[serde(rename = "ledger.hold")]
+    LedgerHold {
+        account: Uuid,
+        #[ts(type = "number")]
+        amount: i64,
+        #[ts(type = "number")]
+        expires_in_secs: i64,
+    },
+    /// Settle a hold to a destination (§10.5): held → captured, moving the amount
+    /// from the holding account to `to`. Ack `{ transfer_id }`.
+    #[serde(rename = "ledger.capture")]
+    LedgerCapture {
+        hold_id: Uuid,
+        to: Uuid,
+    },
+    /// Free a hold without moving money (§10.5): held → released.
+    #[serde(rename = "ledger.release")]
+    LedgerRelease {
+        hold_id: Uuid,
+    },
+
     // ── notify (§10.8) ───────────────────────────────────────────────────
     #[serde(rename = "notify.seen")]
     NotifySeen {
