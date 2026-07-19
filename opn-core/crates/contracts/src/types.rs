@@ -339,6 +339,41 @@ pub enum FeedActivityKind {
     Comment,
 }
 
+/// One post in a feed read page (home/profile/hashtag timelines, post detail;
+/// §10.3, Sprint 8 part B). `body` is the opaque app-owned doc Core caps but
+/// never interprets; `media_ids` were validated owned+live at write time (a
+/// later-deleted media renders missing). `like_count`/`comment_count` are the
+/// denormalized exact counters. Newest-first on the shared cursor idiom (CDR-7).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PostItem {
+    pub id: Uuid,
+    pub app_id: String,
+    pub author_account: Uuid,
+    #[ts(type = "unknown")]
+    pub body: serde_json::Value,
+    #[ts(type = "string[]")]
+    pub media_ids: Vec<Uuid>,
+    #[ts(type = "number")]
+    pub like_count: i64,
+    #[ts(type = "number")]
+    pub comment_count: i64,
+    pub created_at: String,
+}
+
+/// One comment in a post-detail page (§10.3, Sprint 8 part B). `body` is opaque,
+/// size-capped like a post; newest-first on the cursor idiom.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CommentItem {
+    pub id: Uuid,
+    pub post_id: Uuid,
+    pub author_account: Uuid,
+    #[ts(type = "unknown")]
+    pub body: serde_json::Value,
+    pub created_at: String,
+}
+
 // ── tenant link (OPN-CORE.md §5) ──────────────────────────────────────────────
 
 /// Voice-target action on the tenant link (§5, §10.4): `set_targets` names the

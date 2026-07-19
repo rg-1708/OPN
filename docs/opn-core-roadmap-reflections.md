@@ -6,7 +6,149 @@ to OPN-CORE.md as CDRs — this file records *how the build actually went*.
 
 ---
 
-## 2026-07-19 (latest) — Sprint 8 **part A** (feed write plane: schema, posts/follows/likes/comments, advisory event, hashtag parse, media-gate extraction, sub authz): built, verified live; HTTP read surface (part B) deferred
+## 2026-07-19 (latest) — Sprint 8 **part B** (feed read surface: home fan-out-on-read, profile, post detail + comments, hashtag page — HTTP cursor idiom + 100 k EXPLAIN gate + p95): built, verified live; **Sprint 8 complete**
+
+Sprint 8 split on the write-plane/read-plane seam (part A did the writes on part A's committed schema).
+Part B is the **read plane**: the four HTTP timelines the "fan-out-on-read" headline names, plus the two
+exit criteria part A explicitly deferred to here — the 100 k-row EXPLAIN gate and the recorded p95. No
+roadmap amendment: this is roadmap items 3 + the read half of item 4, unchanged.
+
+### What exists now
+
+- **`primitives/feed/read.rs`** (new, read-plane store). Four fns on the shared cursor idiom (CDR-7),
+  every one inside `world_tx(who.world_id)` (RLS): `home` (the fan-out-on-read `EXISTS` timeline — self
+  posts OR followed authors, on `posts_home`), `profile` (one author, on `posts_author`), `post_detail`
+  (the post + a keyset comment page on `comments_post`), `hashtag` (posts under a tag, joined via the
+  `hashtags` PK). `PostRow`/`CommentRow` → `PostItem`/`CommentItem` via `From` (the `i32` counters widen
+  to `i64`, `created_at` → RFC 3339). Reused `ledger`'s `cursor_binds`/`cursor::page`/`rfc3339` — no new
+  idiom minted.
+- **Two authorization shapes**, mirroring part A's write-vs-sub split: `home` is *my* feed, so it resolves
+  the caller's **active** account (`active_account`, `forbidden` if not logged into the app); `profile`/
+  `post_detail`/`hashtag` don't act as an account, so they gate on `require_app_member` (owns *an* account
+  for the app — the same rule `authorize_sub` uses).
+- **`http/feed.rs`** (new): four JWT-authed handlers + `FeedQuery` (`app_id?`, `cursor?`, `limit?`).
+  `FeedQuery::parts` decodes the cursor (garbage → `invalid`) and defaults an absent `app_id` to `""`
+  (which the store rejects as `invalid`). Routes: `GET /v1/feed/{home, profile/{account}, posts/{id},
+  hashtags/{tag}}`.
+- **Contracts**: `PostItem` (id, app_id, author_account, opaque `body`, `media_ids`, `like_count`,
+  `comment_count`, `created_at`) and `CommentItem`; both HTTP-only (ride no Cmd/Evt), so exported
+  explicitly in `export_ts.rs` and re-exported from the crate root. 2 new bindings (`PostItem.ts`,
+  `CommentItem.ts`); the Cmd/Evt graph is untouched, so `coverage.rs` needed no change (reads are HTTP, not
+  commands).
+
+### Decisions closed during implementation (roadmap deviations, all ponytail)
+
+1. **`app_id` is a required query param on every read** (attacker-controlled), gated by
+   `active_account`/`require_app_member` on *that* app. Absent → `""` → `invalid`; empty/oversize → the
+   same `APP_ID_MAX` guard the write path uses. Feed is app-scoped end to end, so a read must name its app.
+2. **Comments are scoped by `post_id` alone** (no `app_id` column on `comments`, §10.3). Sound because a
+   post belongs to exactly one app and the post is fetched app-scoped first — a `not_found` post short-
+   circuits before the comment query, so a comment page can only ever be the app-correct post's.
+3. **`home` gate is stricter than the other reads** (`active_account` vs `require_app_member`). Home is
+   personalized by the caller's own follow set, so "me" *must* be the active account; the other three read
+   another entity's public surface, so app membership suffices. This is the exact write-vs-sub asymmetry
+   from part A, not a new invention.
+4. **The home SQL lives in ONE literal** (`home_select!` macro → `HOME_SQL` + `concat!`-built
+   `HOME_SQL_EXPLAIN`), shared verbatim with the EXPLAIN gate. See keeper below — this was the
+   session's one real (non-test) defect.
+5. **`membership-then-existence` order in `post_detail`** (gate before the post lookup) so a non-member
+   can't tell a real post (`forbidden`) from a missing one (`not_found`) — no cross-app existence oracle.
+   Documented in the fn; now has a dedicated test.
+
+### The keepers this session (the point of rule 4): a seventh-straight test-gap catch, and a query-drift trap
+
+Ran the budgeted adversarial pass as **three parallel lenses** (correctness/SQL, security/RLS/authz,
+independent test-author) via a workflow, then triaged every finding against the code.
+
+- **Correctness/SQL and security/RLS/authz both came back provably clean.** Independent corroboration that
+  the read plane is correct: every query runs in `world_tx(who.world_id)` (world isolation), every
+  posts/hashtag query carries `AND app_id = $2` (app isolation), `post_detail` gates membership before the
+  existence read (no oracle), the keyset `(created_at, id) < (…)` tie-break is total, and the counter/uuid-
+  array/jsonb mappings can't panic. Nothing to fix in the code paths.
+- **The one real code defect (query-drift, MED, self-adjacent to the test layer):** the 100 k EXPLAIN gate
+  was EXPLAIN-ing a **hand-copied duplicate** of the home SQL — byte-identical today but fully decoupled.
+  A future edit to `read::home` that regressed the query to a seq scan would ship green: the assertion
+  `plan.contains("posts_home")` explains the *stale copy*, and the p95 loop's deliberately-loose 200 ms
+  ceiling wouldn't catch a 100 k seq scan either. Fixed structurally: the SELECT is now one macro literal
+  feeding both `HOME_SQL` (the endpoint) and `HOME_SQL_EXPLAIN` (the test) — the plan test now provably
+  observes the exact string the endpoint runs. (A `const` + `concat!`, so both stay `&'static str` and no
+  sqlx-0.9 dynamic-SQL escape hatch is needed.)
+- **The independent test-author leg landed the keeper a seventh straight sprint: cross-app isolation was
+  entirely untested.** Every one of the 9 original tests used the single app `"instapic"`, so the
+  `AND app_id = $2` predicate in `profile`/`post_detail`/`hashtag` was **dead weight no test observed** —
+  drop it and a member of app X reads app Y's posts, comments, and timelines, all still green. The code was
+  correct; the suite didn't know it. Closed with `reads_are_app_isolated`: a second app in the same world,
+  asserting a member of app X gets `not_found` on an app-Y post detail, an empty profile for an app-Y
+  author, and an empty page for a tag app Y used. Same class as part A's advisory-emit gap — a correct
+  predicate with no test is a silent regression waiting to happen.
+
+Five more gaps from the same leg, each closed with a test whose absence would let a specific mutation ship
+green: `post_detail_scopes_comments_to_post` (a second post's comment can't bleed into `WHERE post_id=$1`),
+`post_item_surfaces_counters` (seeds `like_count=5, comment_count=3` — a swapped/zeroed counter field now
+fails; every other test only ever saw the default `0`), `garbage_cursor_is_invalid` (`?cursor=%21%21%21`
+→ 400 `invalid` through the real `FeedQuery::parts` wiring, which `cursor::decode`'s own unit tests never
+exercise), `limit_clamped_to_100_and_floored` (`?limit=1000000` → 100, `?limit=0` → non-empty), and
+`follows_are_directional` (A→B puts B in A's home but A is *not* in B's home — a symmetric-follow bug the
+forward-only assertion would miss).
+
+### Verification (rule 4)
+
+- `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` clean (the `core` crate's
+  `unwrap_used` deny respected — `.expect` in tests only; the one `.unwrap()` I first wrote got caught by
+  clippy, not by me).
+- **Full workspace suite green against the live stack** (Postgres+Redis+MinIO): **0 failures across 33 test
+  binaries**. New `tests/feed_read.rs` = **15** tests (the 4 timelines' happy paths + pagination keyset +
+  the authz negatives + cross-world RLS + the 6 adversarial-gap closers + the 100 k EXPLAIN/p95).
+- **100 k EXPLAIN gate green**: the home query rides `posts_home`, no `Seq Scan on posts` (owner `ANALYZE`
+  first so the planner has fresh stats). **p95 = ~1.0 ms @ 100 k posts** on the dev host (i5-14500) — an
+  order of magnitude under the §10.3 < 10 ms target; recorded here as the first feed-read perf number,
+  Sprint 10 tracks the trend.
+- Drift gate re-armed: 2 new bindings (`PostItem.ts`, `CommentItem.ts`); Cmd/Evt/ClientFrame/ServerMsg
+  unchanged (reads add no wire frame).
+
+### Exit criteria status (Sprint 8 — now fully closed)
+
+| Criterion | Status |
+|---|---|
+| All `feed.*` commands + routes in coverage tests | **CLOSED** — all 7 `feed.*` + `feed.activity` in the coverage match-test (part A); the 4 new `/v1/feed/*` routes each have an integration test in `feed_read.rs` (the repo has no central route-registry test; per-route coverage is the mechanism). |
+| 100 k-row `EXPLAIN` test green | **CLOSED** — `home_100k_uses_posts_home_index_and_records_p95`: no seq scan, rides `posts_home`, and EXPLAINs the *shared* `HOME_SQL` literal so it can't drift from the endpoint. |
+| p95 timeline read < 10 ms at 100 k posts (recorded) | **CLOSED** — ~1.0 ms recorded on the dev host. |
+
+### Reflection
+
+- **The write/read seam paid off exactly like the disjoint-table seams of 4–7.** Part B started from a
+  green, reviewed base; the read plane reused every part-A primitive (`active_account`, `APP_ID_MAX`, the
+  media-less path) and every infra idiom (cursor, `world_tx`, `rfc3339`), so the diff is four SQL queries,
+  four handlers, two response types — no new machinery.
+- **The test-gap lens found the keeper a seventh time, and it was the *unobserved-predicate* class:** a
+  correct `AND app_id = $2` that no test made load-bearing. This is the twin of part A's fire-and-forget
+  advisory — correct code that a single mutation turns wrong with the suite none the wiser. The two
+  correctness/security lenses coming back clean is not "nothing found"; it's the confidence half of the
+  budget ADR-1 buys, and it let the whole session's fixes be *tests plus one drift-proofing*, not code
+  rewrites.
+- **Root-cause over symptom held.** The drift trap was fixed at the source (one shared literal), not by
+  eyeballing that the copy still matched; the cross-app gap was closed with a real second app, not by
+  trusting the predicate reads correctly.
+
+### Not committed / next session
+
+- **Sprint 8 part B is complete and green but untracked** on top of the committed 0–7 + part A. First
+  commit re-arms the drift gate (2 new bindings) and lands `read.rs`, `http/feed.rs`, the 4 routes, the 2
+  contracts types, and `tests/feed_read.rs` — the operator's call, as every sprint.
+- **Sprint 8 is now fully closed** (both part-A-deferred criteria met). Feed — the last primitive — is
+  done; the primitive layer (channels, media, directory, calls, link, ledger, exchange, feed) is complete.
+- **Next: Sprint 9 — verification hardening.** Property tests (ledger conservation, channel seq
+  gaplessness, calls FSM legality, cursor round-trip), `cargo-fuzz` on the client-frame/link-hello/cursor
+  surface, chaos drill scripts, the generated per-table RLS audit (which will now also cover the five feed
+  tables), and `cargo deny`. The three-lens adversarial pass that has caught the keeper every sprint
+  becomes, in Sprint 9, the standing CI machinery instead of a per-sprint ritual.
+- Still open, minor, none blocking: the p95 gate is deliberately loose (200 ms ceiling, ~1 ms actual) —
+  Sprint 10 tightens it; the offline-author `post_liked` inbox path is still only covered by notify's own
+  suite; multi-account-per-app "act as active only" semantics remain as documented in part A.
+
+---
+
+## 2026-07-19 (Sprint 8A) — Sprint 8 **part A** (feed write plane: schema, posts/follows/likes/comments, advisory event, hashtag parse, media-gate extraction, sub authz): built, verified live; HTTP read surface (part B) deferred
 
 Sprint 8 (feed) is one cohesive primitive with no shared-nothing *table* seam like Sprints 4–7
 had (media/directory, calls/link, ledger/exchange each split on disjoint tables). So it splits

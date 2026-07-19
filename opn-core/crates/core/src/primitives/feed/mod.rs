@@ -27,6 +27,11 @@ use crate::infra::db::world_tx;
 use crate::infra::ids::new_id;
 use crate::state::AppState;
 
+/// Sprint 8 part B: the HTTP read surface (home/profile/detail/hashtag),
+/// built on part A's committed schema + writes. Shares `active_account` and
+/// `APP_ID_MAX` with this module (descendant-visible).
+pub mod read;
+
 /// Max serialized body for a post or comment (§10.3). Above this → `too_large`.
 const BODY_MAX_BYTES: usize = 4 * 1024;
 /// Max attachments per post — bounds the owned+live check; media is validated,

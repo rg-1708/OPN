@@ -34,5 +34,9 @@ fn main() {
     contracts::ActiveCall::export_all_to(dir).expect("export ActiveCall");
     // ledger (§10.5): the history row rides HTTP, not the Cmd/Evt graph.
     contracts::TransferItem::export_all_to(dir).expect("export TransferItem");
+    // feed (§10.3): the read-surface rows ride HTTP, not the Cmd/Evt graph
+    // (FeedActivityKind is already reachable via Evt::FeedActivity).
+    contracts::PostItem::export_all_to(dir).expect("export PostItem");
+    contracts::CommentItem::export_all_to(dir).expect("export CommentItem");
     println!("bindings written to {dir}");
 }

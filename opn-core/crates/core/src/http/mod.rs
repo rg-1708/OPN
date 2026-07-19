@@ -11,6 +11,7 @@ use crate::state::AppState;
 pub mod auth;
 pub mod channels;
 pub mod exchange;
+pub mod feed;
 pub mod ledger;
 pub mod media;
 pub mod notify;
@@ -31,6 +32,10 @@ pub fn app_router(state: AppState) -> Router {
         .route("/v1/media", get(media::list))
         .route("/v1/channels/{id}/messages", get(channels::history))
         .route("/v1/ledger/history", get(ledger::history))
+        .route("/v1/feed/home", get(feed::home))
+        .route("/v1/feed/profile/{account}", get(feed::profile))
+        .route("/v1/feed/posts/{id}", get(feed::post_detail))
+        .route("/v1/feed/hashtags/{tag}", get(feed::hashtag))
         .with_state(state)
 }
 

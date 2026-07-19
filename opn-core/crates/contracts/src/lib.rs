@@ -16,8 +16,8 @@ pub use error::{ErrBody, ErrCode};
 pub use evt::{Evt, EvtClass};
 pub use types::{
     ActiveCall, AppAccountInfo, CallKind, CallParticipant, CallParticipantState, CallSessionState,
-    ChannelSummary, CharacterInfo, ContactItem, DeviceInfo, FeedActivityKind, InboxItem, LinkHello,
-    ListingItem, MePayload, MediaItem, MediaKind, MessageBody, MessageItem, MessagePreview,
-    NotifyClass, ReceiptKind, ResolveResult, SessionMintResponse, TransferItem, UploadTarget,
-    UploadTicket, VoiceAction,
+    ChannelSummary, CharacterInfo, CommentItem, ContactItem, DeviceInfo, FeedActivityKind,
+    InboxItem, LinkHello, ListingItem, MePayload, MediaItem, MediaKind, MessageBody, MessageItem,
+    MessagePreview, NotifyClass, PostItem, ReceiptKind, ResolveResult, SessionMintResponse,
+    TransferItem, UploadTarget, UploadTicket, VoiceAction,
 };
