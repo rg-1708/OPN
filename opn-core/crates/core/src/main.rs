@@ -82,9 +82,11 @@ async fn main() {
         opn_core::gateway::fanout::spawn_listener(state.clone());
     }
 
-    let app_listener = tokio::net::TcpListener::bind(state.cfg.bind)
-        .await
-        .expect("bind OPN_BIND");
+    let app_listener = opn_core::listener::NoDelayListener(
+        tokio::net::TcpListener::bind(state.cfg.bind)
+            .await
+            .expect("bind OPN_BIND"),
+    );
     let metrics_listener = tokio::net::TcpListener::bind(state.cfg.metrics_bind)
         .await
         .expect("bind OPN_METRICS_BIND");
@@ -93,7 +95,8 @@ async fn main() {
     // connect_info: the WS pre-auth per-IP cap needs the peer address.
     let app = axum::serve(
         app_listener,
-        http::app_router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        http::app_router(state)
+            .into_make_service_with_connect_info::<opn_core::listener::ClientAddr>(),
     );
     let metrics = axum::serve(metrics_listener, http::metrics_router(prometheus));
     tokio::select! {

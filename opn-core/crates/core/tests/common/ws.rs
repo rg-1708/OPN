@@ -44,7 +44,7 @@ pub async fn spawn_server(state: AppState) -> TestServer {
     let task = tokio::spawn(async move {
         axum::serve(
             listener,
-            router.into_make_service_with_connect_info::<SocketAddr>(),
+            router.into_make_service_with_connect_info::<opn_core::listener::ClientAddr>(),
         )
         .await
         .expect("serve");

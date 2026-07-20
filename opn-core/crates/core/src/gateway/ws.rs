@@ -6,7 +6,7 @@
 //! `cfx-nui-*`); the authoritative per-tenant check re-runs after the auth
 //! frame resolves the tenant.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -81,7 +81,7 @@ fn is_nui_origin(origin: &str) -> bool {
 
 pub async fn ws_handler(
     State(state): State<AppState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    ConnectInfo(crate::listener::ClientAddr(addr)): ConnectInfo<crate::listener::ClientAddr>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
