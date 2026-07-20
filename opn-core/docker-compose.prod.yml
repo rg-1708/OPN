@@ -69,9 +69,13 @@ services:
       start_period: 60s
     labels:
       - "traefik.enable=true"
-      # Router: HTTPS only, host from ${OPN_DOMAIN}, LE cert.
-      - "traefik.http.routers.opn-core.rule=Host(`${OPN_DOMAIN}`)"
-      - "traefik.http.routers.opn-core.entrypoints=websecure"
+      # Router: HTTPS only, LE cert. Coolify-specific: its Traefik names the TLS
+      # entrypoint `https` (not stock `websecure`), and it does NOT expand
+      # ${VAR} inside traefik labels (only in environment/command), so the host
+      # is hardcoded here. Keep in sync with OPN_DOMAIN.
+      # ponytail: hardcoded domain, Coolify won't substitute label vars.
+      - "traefik.http.routers.opn-core.rule=Host(`opn-core.mainframenetwork.com`)"
+      - "traefik.http.routers.opn-core.entrypoints=https"
       - "traefik.http.routers.opn-core.tls=true"
       - "traefik.http.routers.opn-core.tls.certresolver=letsencrypt"
       # Min TLS 1.2 + HSTS. `tls.options=default@file` references a Traefik
