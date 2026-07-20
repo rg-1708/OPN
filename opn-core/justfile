@@ -64,6 +64,14 @@ perf scenario="design":
     #!/usr/bin/env bash
     set -euo pipefail
 
+    # 3000-conn scenarios (soak10x, reconnect-storm) open >3000 sockets across
+    # Core + loadgen in this one process tree; the distro's default 1024 soft fd
+    # limit throws "Too many open files" on connect well before that. Raise the
+    # soft limit to the hard cap (no root). If `ulimit -Hn` itself is small,
+    # raise DefaultLimitNOFILE (systemd) or limits.conf as root. Host calibration
+    # knob, like PERF_CPUSET — not a fixed constant.
+    ulimit -n "$(ulimit -Hn)" 2>/dev/null || true
+
     # Kill Core and tear the stack down no matter how we exit.
     cleanup() {
         [ -n "${CORE_PID:-}" ] && kill "$CORE_PID" 2>/dev/null || true
