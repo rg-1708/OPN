@@ -52,21 +52,33 @@ provisions the Let's Encrypt cert on first deploy.
 
 ## 2. Coolify app
 
-- **New resource → Docker Compose**, from this repo.
-- **Build Pack:** `Docker Compose`. **Base Directory:** the template root (where
-  `docker-compose.deploy.yml` lives). **Compose file:** `docker-compose.deploy.yml`.
-- **Domains:** leave every per-service Domains field **empty** — routing is fully
-  defined by the `traefik.*` labels in the compose.
-- **Environment variables** (add by hand — Coolify does not scrape `${VAR}` refs):
+This is a **single container**, so use the **Dockerfile** build pack — Coolify
+generates the Traefik router from the UI, so you write no `traefik.*` labels
+(and dodge the `${VAR}`-in-label quirk that bites the compose path).
+
+- **New resource → Dockerfile**, from this repo.
+- **Build Pack:** `Dockerfile`. **Base Directory:** the template root (where the
+  `Dockerfile` lives).
+- **Domain:** set `https://opn-web.mainframenetwork.com` in Coolify's Domains
+  field. Coolify builds the router, provisions the Let's Encrypt cert, and
+  terminates TLS; WebSocket upgrades pass through automatically. Port `8080`
+  (Coolify reads `EXPOSE`).
+- **Environment variables:**
 
   | var | value | notes |
   |---|---|---|
   | `OPN_CORE_URL` | `https://opn-core.mainframenetwork.com` | Core's public base — used to mint and as the `/ws` upstream |
   | `OPN_TENANT_API_KEY` | `opn_…` from step 0 | **secret**, server-side only |
 
-- The web domain is **hardcoded** in the router label
-  (`Host(\`opn-web.mainframenetwork.com\`)`) because Coolify does not expand
-  `${VAR}` inside `traefik.*` labels. Changing the domain = editing the compose.
+- The container's `HEALTHCHECK` (`/healthz`) gates the rollout.
+
+> **Alternative — Docker Compose build pack.** Use
+> [docker-compose.deploy.yml](../docker-compose.deploy.yml) instead if you want
+> to pin the Traefik labels yourself — e.g. sticky-cookie WS across multiple
+> replicas, or explicit HSTS. Then leave the per-service Domains field **empty**
+> (labels define routing), add the env vars by hand, and note that the domain is
+> **hardcoded** in the router label because Coolify does not expand `${VAR}`
+> inside `traefik.*` labels. For a single replica the Dockerfile pack is simpler.
 
 ## 3. Deploy
 

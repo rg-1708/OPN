@@ -11,10 +11,19 @@
 export const CORE_URL = process.env.OPN_CORE_URL;
 const API_KEY = process.env.OPN_TENANT_API_KEY;
 
-/** Fail fast if the server was started without its credentials. */
+/** Fail fast (with a readable message, not a raw stack) if misconfigured. */
 export function assertEnv() {
   if (!CORE_URL) {
     console.error("FATAL: OPN_CORE_URL is required (e.g. https://opn-core.example.com)");
+    process.exit(1);
+  }
+  try {
+    const u = new URL(CORE_URL);
+    if (u.protocol !== "http:" && u.protocol !== "https:") throw new Error("bad scheme");
+  } catch {
+    console.error(
+      `FATAL: OPN_CORE_URL must be a full URL with scheme, e.g. https://opn-core.example.com (got: ${CORE_URL})`,
+    );
     process.exit(1);
   }
   if (!API_KEY) {

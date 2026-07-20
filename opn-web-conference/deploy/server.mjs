@@ -110,7 +110,22 @@ server.on("upgrade", (req, clientSocket, head) => {
     proxySocket.on("error", bail);
     clientSocket.on("error", bail);
   });
-  proxyReq.on("error", () => clientSocket.destroy());
+  // Core answered WITHOUT upgrading (e.g. 403 origin not allowed). Forward the
+  // status so the browser fails fast + logs it, instead of hanging on no 101.
+  proxyReq.on("response", (proxyRes) => {
+    console.error(`ws proxy: Core replied ${proxyRes.statusCode} (not 101) for ${req.url} — origin allowlisted on Core?`);
+    const headerLines = Object.entries(proxyRes.headers)
+      .map(([k, v]) => `${k}: ${v}`)
+      .join("\r\n");
+    clientSocket.write(
+      `HTTP/1.1 ${proxyRes.statusCode} ${proxyRes.statusMessage ?? ""}\r\n${headerLines}\r\n\r\n`,
+    );
+    clientSocket.end();
+  });
+  proxyReq.on("error", (e) => {
+    console.error(`ws proxy: cannot reach Core (${e.message})`);
+    clientSocket.destroy();
+  });
   proxyReq.end();
 });
 

@@ -21,4 +21,7 @@ COPY deploy/server.mjs ./deploy/server.mjs
 COPY dev-auth/join.mjs ./dev-auth/join.mjs
 USER node
 EXPOSE 8080
+# Rollout gate — Coolify/Traefik hold traffic until this passes. Node 22 has fetch.
+HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=5 \
+  CMD node -e "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 CMD ["node", "deploy/server.mjs"]
