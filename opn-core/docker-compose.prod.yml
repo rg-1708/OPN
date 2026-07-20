@@ -78,11 +78,12 @@ services:
       - "traefik.http.routers.opn-core.entrypoints=https"
       - "traefik.http.routers.opn-core.tls=true"
       - "traefik.http.routers.opn-core.tls.certresolver=letsencrypt"
-      # Min TLS 1.2 + HSTS. `tls.options=default@file` references a Traefik
-      # dynamic-config options block the operator defines once
-      # (minVersion: VersionTLS12) — TLS versions cannot be set per-router by
-      # label alone. See docs/runbooks/deploy-rollback.md.
-      - "traefik.http.routers.opn-core.tls.options=default@file"
+      # HSTS. Min-TLS-1.2 via `tls.options=default@file` was dropped: Coolify
+      # manages /traefik/dynamic and reconciles away hand-dropped options files,
+      # so the block never registered and the router failed to build. Re-add the
+      # TLS floor through Coolify's own TLS config (not a raw file), then restore
+      # the tls.options label. See docs/runbooks/deploy-rollback.md.
+      # ponytail: TLS floor deferred, uses Traefik default; upgrade via Coolify TLS config.
       - "traefik.http.routers.opn-core.middlewares=opn-hsts@docker"
       - "traefik.http.middlewares.opn-hsts.headers.stsSeconds=31536000"
       - "traefik.http.middlewares.opn-hsts.headers.stsIncludeSubdomains=true"
