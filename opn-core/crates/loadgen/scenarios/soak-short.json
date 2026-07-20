@@ -1,7 +1,7 @@
 {
   "_comment": "Routine/dev soak (roadmap Sprint 11 item 7's '1 h mini-soak', run a bit longer at 2 h). DESIGN load — 300 conns, 30 msg/s — NOT soak10x's 10x/3000-conn load: this one is meant to run often on the RAM-limited dev host and reuses the design driver. At 2 h it is ~24x the 5-min nightly smoke, long enough to surface RSS creep / fd leaks / janitor accumulation that the smoke cannot, while the full 24 h 10x soak (soak10x.json) stays the once-per-release gate (OPN.md §15). assert_ack_p99_ms omitted until item 7 measures it (same call as design.json / soak10x.json). Item 6's RSS-slope / fd / p99-drift targets are operator-observed here too. api_key injected via OPN_LOADGEN_API_KEY. Run: `just perf soak-short`.",
-  "target_http": "http://127.0.0.1:8080",
-  "target_ws": "ws://127.0.0.1:8080/ws",
+  "target_http": "http://127.0.0.1:18080",
+  "target_ws": "ws://127.0.0.1:18080/ws",
   "api_key": "",
   "connections": 300,
   "duration_secs": 7200,

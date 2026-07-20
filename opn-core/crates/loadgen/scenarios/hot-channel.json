@@ -1,7 +1,7 @@
 {
   "_comment": "Sprint 10 item 1 'hot-channel': the fan-out stress shape. group=true makes connection 0 create one group channel (`channels.create`, cap 32) and then `channels.member_add` the other 99 connections, paced under the Social rate budget (~5/s, ~200ms apart), after which all 100 connections subscribe to that single channel and send at total_msgs_per_sec aggregate. One send fans out to every subscriber, so 10 msg/s across a ~100-member group ≈ 1000 evt/s of delivery — the roadmap's 'one 100-member group at 10 msg/s (fan-out 1000 evt/s)'. warmup_secs=25 covers the create plus the ~67 paced member_adds (99 adds at ~5/s ≈ 20s) before the aligned first send, so the group is fully populated when steady-state begins. The gated invariants are assert_no_seq_gaps (delivery continuity must hold under the heavy fan-out) and assert_no_durable_closes (the 100-way fan-out must never slow-consumer-close a healthy socket). assert_ack_p99_ms is omitted on purpose: item 7 tightens the ack gate to measured-p99 + margin only after the fix loop measures it — do not assert an unmeasured threshold (same call as soak10x.json). This committed file is the real 100-conn spec (soak10x / reconnect-storm precedent: commit the spec, the heavy run is the operator's pinned-hardware pass); the machinery was locally verified at a smaller group. api_key injected via OPN_LOADGEN_API_KEY. Run: `just perf hot-channel`.",
-  "target_http": "http://127.0.0.1:8080",
-  "target_ws": "ws://127.0.0.1:8080/ws",
+  "target_http": "http://127.0.0.1:18080",
+  "target_ws": "ws://127.0.0.1:18080/ws",
   "api_key": "",
   "connections": 100,
   "duration_secs": 120,

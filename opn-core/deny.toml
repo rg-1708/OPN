@@ -40,6 +40,10 @@ allow = [
     "CC0-1.0",
     "Unlicense",
     "OpenSSL",
+    # Boost license, OSI-approved (xxhash-rust via redis).
+    "BSL-1.0",
+    # Mozilla CA certificate data license (webpki-roots).
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.9
 

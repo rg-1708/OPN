@@ -90,8 +90,10 @@ perf scenario="design":
     export S3_KEY=opn
     export S3_SECRET=opnsecret
     export OPN_JWT_SECRET=perf-secret
-    export OPN_BIND=127.0.0.1:8080
-    export OPN_METRICS_BIND=127.0.0.1:9090
+    # 18080/19090, not 8080/9090: the perf host runs Coolify, whose Traefik
+    # proxy owns 8080. Perf scenario JSONs target the same ports.
+    export OPN_BIND=127.0.0.1:18080
+    export OPN_METRICS_BIND=127.0.0.1:19090
     # All loadgen conns come from one IP; raise both pre-auth caps (per-IP
     # default 5, global default 1000) above any scenario's connection count so
     # the trusted single-source generator is never admission-throttled. 4000
@@ -106,7 +108,7 @@ perf scenario="design":
     # Poll healthz (30×1s, same as perf-smoke.yml).
     healthy=0
     for _ in $(seq 1 30); do
-        if curl -sf http://127.0.0.1:8080/healthz > /dev/null; then
+        if curl -sf http://127.0.0.1:18080/healthz > /dev/null; then
             echo "core healthy"; healthy=1; break
         fi
         sleep 1
