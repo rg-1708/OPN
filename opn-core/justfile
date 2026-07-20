@@ -43,3 +43,91 @@ chaos:
     bash chaos/pg-restart.sh
     bash chaos/redis-restart.sh
     bash chaos/link-drop.sh
+
+# CPU cores Core is pinned to for the perf run (roadmap Sprint 10 item 2: "a
+# colocated generator steals the CPU it is measuring"). The i5-14500 is a hybrid
+# CPU — 6 P-cores are logical CPUs 0–11 (hyperthreaded), 8 E-cores are logical
+# CPUs 12–19 (no HT). Pinning Core to the E-cores leaves the loadgen and OS on
+# the P-cores so they never steal the cores Core is measured on. This is a
+# hardware calibration knob, NOT a fixed constant: verify your topology with
+# `lscpu -e` and override PERF_CPUSET if your logical-CPU numbering differs.
+PERF_CPUSET := "12-19"
+
+# Sprint 10 production-shaped perf run (roadmap item 3). Like `just chaos` this
+# orchestrates its own compose stack, so on the dev host run it under the docker
+# group:  sg docker -c 'just perf'
+# (crates/loadgen/scenarios/design.json is owned by the loadgen crate — this
+# recipe only references it.)
+# Runs the `design` scenario end to end; its JSON summary lands in perf/results/.
+perf:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Kill Core and tear the stack down no matter how we exit.
+    cleanup() {
+        [ -n "${CORE_PID:-}" ] && kill "$CORE_PID" 2>/dev/null || true
+        docker compose -f docker-compose.perf.yml down
+    }
+    trap cleanup EXIT
+
+    docker compose -f docker-compose.perf.yml up -d --wait postgres redis
+
+    # Release is mandatory: a debug build's latency is meaningless (same reason
+    # as perf-smoke.yml).
+    cargo build --release -p opn-core -p opn-loadgen
+
+    # Core config mirrors perf-smoke.yml, except the runtime DATABASE_URL is the
+    # non-bypassing opn_app role (CDR-3), NOT opn_migrate: production runs as
+    # opn_app, so the RLS-policy cost must be inside the measured path or the
+    # numbers are optimistic. Migrations still run as opn_migrate (owner). Same
+    # split chaos/lib.sh uses.
+    export DATABASE_URL=postgres://opn_app:opn@localhost:5432/opn
+    export OPN_MIGRATE_DATABASE_URL=postgres://opn_migrate:opn@localhost:5432/opn
+    export REDIS_URL=redis://localhost:6379
+    export S3_ENDPOINT=http://localhost:9000
+    export S3_BUCKET=opn
+    export S3_KEY=opn
+    export S3_SECRET=opnsecret
+    export OPN_JWT_SECRET=perf-secret
+    export OPN_BIND=127.0.0.1:8080
+    export OPN_METRICS_BIND=127.0.0.1:9090
+    # 300 conns from one IP would trip the default per-IP pre-auth cap; raise it
+    # above the connection count (same as perf-smoke.yml).
+    export OPN_PREAUTH_PER_IP_MAX='400'
+
+    # Pin Core to the E-cores and cap its tokio runtime at 4 worker threads.
+    TOKIO_WORKER_THREADS=4 taskset -c {{PERF_CPUSET}} ./target/release/opn-core > perf-core.log 2>&1 &
+    CORE_PID=$!
+
+    # Poll healthz (30×1s, same as perf-smoke.yml).
+    healthy=0
+    for _ in $(seq 1 30); do
+        if curl -sf http://127.0.0.1:8080/healthz > /dev/null; then
+            echo "core healthy"; healthy=1; break
+        fi
+        sleep 1
+    done
+    if [ "$healthy" -ne 1 ]; then
+        echo "core did not become healthy within 30s" >&2
+        cat perf-core.log >&2
+        exit 1
+    fi
+
+    # Mint a tenant and export its one-time API key (mirror perf-smoke.yml).
+    out=$(./target/release/opn-core admin create-tenant --name perf --new-world perfworld)
+    echo "$out"
+    key=$(echo "$out" | sed -n 's/^api key:[[:space:]]*//p')
+    if [ -z "$key" ]; then
+        echo "failed to capture api key from admin output" >&2
+        exit 1
+    fi
+    export OPN_LOADGEN_API_KEY="$key"
+
+    # Run the design scenario. Capture the one JSON summary line AND preserve
+    # loadgen's exit code — `|| code=$?` instead of a pipe that would mask it.
+    mkdir -p perf/results
+    out_file="perf/results/$(date +%Y-%m-%d)-design.json"
+    code=0
+    ./target/release/opn-loadgen --scenario crates/loadgen/scenarios/design.json > "$out_file" || code=$?
+    cat "$out_file"
+    exit $code

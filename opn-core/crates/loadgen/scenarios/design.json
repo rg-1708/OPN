@@ -1,0 +1,15 @@
+{
+  "_comment": "Sprint 10 item 1 'design': steady-state realistic load — 300 conns, 30 msg/s aggregate, mix ~80% send / ~10% typing / ~5% mark_read (typing_every=10, read_every=20). assert_no_seq_gaps turns the delivery guarantee into a continuously-checked property (test plan). Groups deferred to the hot-channel slice — this is the paired-DM graph. assert_ack_p99_ms stays at the loose 25.0 on purpose: item 6's 5 ms is the *post-optimization* target and item 7 tightens this gate to measured-p99 + 50% only after the fix loop measures it — do not assert a threshold you have not measured. api_key injected via OPN_LOADGEN_API_KEY. Run via `just perf` on the core-pinned perf stack.",
+  "target_http": "http://127.0.0.1:8080",
+  "target_ws": "ws://127.0.0.1:8080/ws",
+  "api_key": "",
+  "connections": 300,
+  "duration_secs": 300,
+  "total_msgs_per_sec": 30.0,
+  "warmup_secs": 5,
+  "typing_every": 10,
+  "read_every": 20,
+  "assert_ack_p99_ms": 25.0,
+  "assert_no_durable_closes": true,
+  "assert_no_seq_gaps": true
+}

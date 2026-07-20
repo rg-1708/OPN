@@ -10,5 +10,6 @@
   "typing_every": 5,
   "read_every": 10,
   "assert_ack_p99_ms": 25.0,
-  "assert_no_durable_closes": true
+  "assert_no_durable_closes": true,
+  "assert_no_seq_gaps": true
 }

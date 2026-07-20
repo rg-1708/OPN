@@ -65,6 +65,11 @@ struct Scenario {
     /// the "the DB-outage gap produced error acks, not silence" invariant.
     #[serde(default)]
     assert_error_acks: bool,
+    /// Delivery gate (roadmap Sprint 10 test plan): fail if any subscribed
+    /// channel's received seq stream had a hole — turning the "no acked message
+    /// is lost" guarantee into a continuously-checked property under load.
+    #[serde(default)]
+    assert_no_seq_gaps: bool,
 }
 
 fn default_warmup() -> u64 {
@@ -303,6 +308,7 @@ struct Summary {
     connections: u64,
     sends: u64,
     recvs: u64,
+    seq_gaps: u64,
     rate_limited: u64,
     error_acks: u64,
     durable_closes: u64,
@@ -334,6 +340,7 @@ impl Summary {
                     dels.extend_from_slice(&s.deliveries_us);
                     all.sends += s.sends;
                     all.recvs += s.recvs;
+                    all.seq_gaps += s.seq_gaps;
                     all.rate_limited += s.rate_limited;
                     all.error_acks += s.error_acks;
                     all.durable_closes += s.durable_closes;
@@ -355,6 +362,7 @@ impl Summary {
             connections,
             sends: all.sends,
             recvs: all.recvs,
+            seq_gaps: all.seq_gaps,
             rate_limited: all.rate_limited,
             error_acks: all.error_acks,
             durable_closes: all.durable_closes,
@@ -372,6 +380,7 @@ impl Summary {
             "connections": self.connections,
             "sends": self.sends,
             "recvs": self.recvs,
+            "seq_gaps": self.seq_gaps,
             "rate_limited": self.rate_limited,
             "error_acks": self.error_acks,
             "durable_closes": self.durable_closes,
@@ -402,6 +411,7 @@ impl Summary {
         );
         eprintln!("rate_limited    {}", self.rate_limited);
         eprintln!("error_acks      {}", self.error_acks);
+        eprintln!("seq_gaps        {}", self.seq_gaps);
         eprintln!(
             "closes          durable {}  other {}",
             self.durable_closes, self.other_closes
@@ -443,6 +453,14 @@ impl Summary {
             eprintln!(
                 "loadgen: FAIL — assert_error_acks set but 0 error acks seen \
                  (the DB-outage gap should have produced error acks, not silence)"
+            );
+            failed = true;
+        }
+        if scenario.assert_no_seq_gaps && self.seq_gaps > 0 {
+            eprintln!(
+                "loadgen: FAIL — {} seq gap(s): an acked message was lost from a \
+                 subscriber's channel stream (delivery guarantee breached)",
+                self.seq_gaps
             );
             failed = true;
         }

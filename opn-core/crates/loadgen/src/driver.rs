@@ -69,6 +69,15 @@ pub struct ConnStats {
     pub deliveries_us: Vec<u64>,
     pub sends: u64,
     pub recvs: u64,
+    /// Missing seqs in every subscribed channel's received `channels.message`
+    /// stream (roadmap Sprint 10 test-plan deliverable: the delivery guarantee
+    /// as a continuously-checked property). The guarantee is "no acked message
+    /// is lost", NOT in-order arrival — post-commit fan-out (`channels/mod.rs`)
+    /// is fire-and-forget, so two concurrent sends can reach a subscriber out of
+    /// seq order (OPN.md §5: the client reorders by seq). So this counts *holes*
+    /// in the received seq set, tolerating transient reorder (`SeqTracker`).
+    /// Nonzero under design load ⇒ a genuinely lost message ⇒ a delivery bug.
+    pub seq_gaps: u64,
     pub rate_limited: u64,
     /// Non-ok acks that are *not* rate-limits (internal/not_found/…). The
     /// pg-restart drill's "error acks, not silence" signal: while its DB pool
@@ -99,6 +108,62 @@ impl ConnStats {
             errors: 1,
             error_detail: Some(detail),
             ..Default::default()
+        }
+    }
+}
+
+/// Per-channel seq-continuity tracker. Feeds every received `channels.message`
+/// seq for one channel and, at the end of the run, reports how many seqs are
+/// *missing* from the contiguous run `[first_seen .. max_seen]`.
+///
+/// It is deliberately order-insensitive: fan-out is post-commit and
+/// fire-and-forget (`channels/mod.rs`), so seqs 1 and 2 from two concurrent
+/// senders can arrive as `2, 1`. `frontier` is the highest seq below which the
+/// stream is fully contiguous; anything above a hole waits in `pending` until
+/// the hole fills. The reorder window is microseconds-to-single-digit-ms (bound
+/// by command latency), while the run's 2 s drain grace dwarfs it, so at run end
+/// `pending` is empty unless a seq was *genuinely* lost. Memory is
+/// O(reorder-window), not O(messages) — soak-safe for the 24 h scenario.
+#[derive(Default)]
+pub struct SeqTracker {
+    /// Highest seq S with every seq in `[first_seen ..= S]` received. `None`
+    /// until the first message.
+    frontier: Option<i64>,
+    /// Received seqs above a not-yet-filled hole (i.e. `> frontier + 1`).
+    pending: std::collections::BTreeSet<i64>,
+}
+
+impl SeqTracker {
+    fn observe(&mut self, seq: i64) {
+        match self.frontier {
+            None => self.frontier = Some(seq),
+            // Duplicate or a resent seq at/below the frontier — not a gap.
+            Some(f) if seq <= f => {}
+            // Fills the next hole: advance, then absorb any pending run behind it.
+            Some(f) if seq == f + 1 => {
+                let mut nf = seq;
+                while self.pending.remove(&(nf + 1)) {
+                    nf += 1;
+                }
+                self.frontier = Some(nf);
+            }
+            // Arrived ahead of a still-open hole — hold it.
+            Some(_) => {
+                self.pending.insert(seq);
+            }
+        }
+    }
+
+    /// Missing seqs in `[first_seen .. max_seen]` given the settled state.
+    fn gaps(&self) -> u64 {
+        match self.frontier {
+            None => 0,
+            Some(f) => {
+                let max = self.pending.iter().next_back().copied().unwrap_or(f);
+                // `[f+1 ..= max]` has `max - f` slots; `pending` fills its own
+                // count of them; the rest (at least seq `f+1`) are real holes.
+                (max - f).max(0) as u64 - self.pending.len() as u64
+            }
         }
     }
 }
@@ -197,6 +262,10 @@ async fn drive(cfg: ConnConfig) -> Result<ConnStats> {
     };
     let mut pending: HashMap<u64, Instant> = HashMap::new();
     let mut last_seen_seq: i64 = 0;
+    // One seq-continuity tracker per subscribed channel. This connection subs a
+    // single `ch:<id>`, so the map holds one entry; keying by channel id keeps
+    // it correct if a future scenario subscribes to several (hot-channel groups).
+    let mut trackers: HashMap<Uuid, SeqTracker> = HashMap::new();
     let mut send_count: u64 = 0;
 
     // First tick fires exactly at the shared `start_at`, so every connection
@@ -258,7 +327,7 @@ async fn drive(cfg: ConnConfig) -> Result<ConnStats> {
                 match frame {
                     None | Some(Err(_)) => break,
                     Some(Ok(Message::Text(t))) => {
-                        handle_incoming(&t, cfg.char_id, cfg.epoch, &mut pending, &mut last_seen_seq, &mut stats, record_acks);
+                        handle_incoming(&t, cfg.char_id, cfg.epoch, &mut pending, &mut last_seen_seq, &mut trackers, &mut stats, record_acks);
                     }
                     Some(Ok(Message::Close(c))) => {
                         match c.map(|f| u16::from(f.code)) {
@@ -274,16 +343,22 @@ async fn drive(cfg: ConnConfig) -> Result<ConnStats> {
         }
     }
 
+    // Collapse per-channel trackers into the one summary counter now the stream
+    // has drained (out-of-order seqs have had the drain grace to settle).
+    stats.seq_gaps = trackers.values().map(SeqTracker::gaps).sum();
+
     Ok(stats)
 }
 
 /// Parse one server frame and fold it into the running stats.
+#[allow(clippy::too_many_arguments)]
 fn handle_incoming(
     text: &str,
     me: Uuid,
     epoch: Instant,
     pending: &mut HashMap<u64, Instant>,
     last_seen_seq: &mut i64,
+    trackers: &mut HashMap<Uuid, SeqTracker>,
     stats: &mut ConnStats,
     record_acks: bool,
 ) {
@@ -325,13 +400,20 @@ fn handle_incoming(
             }
         }
         ServerMsg::Push {
-            evt: Evt::ChannelsMessage {
-                sender, seq, body, ..
-            },
+            evt:
+                Evt::ChannelsMessage {
+                    channel_id,
+                    sender,
+                    seq,
+                    body,
+                    ..
+                },
             ..
         } => {
             stats.recvs += 1;
             *last_seen_seq = (*last_seen_seq).max(seq);
+            // Track continuity per channel (order-insensitive; see `SeqTracker`).
+            trackers.entry(channel_id).or_default().observe(seq);
             // Delivery latency only for the peer's messages — self fan-out would
             // measure the loopback path, not cross-connection delivery.
             if sender != me {
@@ -405,16 +487,90 @@ mod tests {
         pending.insert(7, Instant::now());
         let mut stats = ConnStats::default();
         let mut seen = 0i64;
+        let mut trackers = HashMap::new();
         handle_incoming(
             text,
             Uuid::nil(),
             Instant::now(),
             &mut pending,
             &mut seen,
+            &mut trackers,
             &mut stats,
             false,
         );
         stats
+    }
+
+    /// Final gap count after feeding `seqs` (in arrival order) to one tracker.
+    fn gaps_of(seqs: &[i64]) -> u64 {
+        let mut t = SeqTracker::default();
+        for &s in seqs {
+            t.observe(s);
+        }
+        t.gaps()
+    }
+
+    #[test]
+    fn seq_in_order_no_gaps() {
+        assert_eq!(gaps_of(&[4, 5, 6, 7]), 0); // first-seen need not be 1
+    }
+
+    #[test]
+    fn seq_out_of_order_that_resolves_is_no_gap() {
+        // The real fan-out reorder case: 2 arrives before 1, but both arrive.
+        assert_eq!(gaps_of(&[1, 3, 2, 4]), 0);
+        assert_eq!(gaps_of(&[5, 4, 6, 8, 7]), 0);
+    }
+
+    #[test]
+    fn seq_genuine_hole_is_a_gap() {
+        assert_eq!(gaps_of(&[1, 2, 4]), 1); // 3 lost
+        assert_eq!(gaps_of(&[1, 2, 5]), 2); // 3 and 4 lost
+        assert_eq!(gaps_of(&[10, 11, 13, 14, 17]), 3); // 12, 15, 16 lost
+    }
+
+    #[test]
+    fn seq_duplicate_is_not_a_gap() {
+        assert_eq!(gaps_of(&[1, 2, 2, 3]), 0);
+        assert_eq!(gaps_of(&[3, 1, 2, 1]), 0); // late dup below frontier ignored
+    }
+
+    #[test]
+    fn seq_gaps_surface_through_handle_incoming() {
+        // Two messages on one channel with seq 1 then 3 → one lost (seq 2).
+        // Built from the real wire types (not hand-written JSON) so the test
+        // rides the actual `channels.message` serialization, not a guess at it.
+        let cid = Uuid::now_v7();
+        let mut pending = HashMap::new();
+        let mut stats = ConnStats::default();
+        let mut seen = 0i64;
+        let mut trackers = HashMap::new();
+        for seq in [1, 3] {
+            let msg = ServerMsg::Push {
+                topic: format!("ch:{cid}"),
+                evt: Evt::ChannelsMessage {
+                    channel_id: cid,
+                    message_id: Uuid::now_v7(),
+                    seq,
+                    sender: Uuid::nil(),
+                    body: json!({}),
+                    at: "now".into(),
+                },
+            };
+            let text = serde_json::to_string(&msg).expect("serialize push");
+            handle_incoming(
+                &text,
+                Uuid::nil(),
+                Instant::now(),
+                &mut pending,
+                &mut seen,
+                &mut trackers,
+                &mut stats,
+                false,
+            );
+        }
+        assert_eq!(stats.recvs, 2);
+        assert_eq!(trackers.values().map(SeqTracker::gaps).sum::<u64>(), 1);
     }
 
     #[test]
