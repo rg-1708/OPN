@@ -20,6 +20,8 @@ export { OpnConnection } from "./connection.ts";
 export { OpnError, type OpnErrorCode } from "./errors.ts";
 export { DedupeRing } from "./dedupe.ts";
 export { backoffMs } from "./backoff.ts";
+export { ChannelStore, createChannelStore } from "./channel.ts";
+export type { ChatMessage, ChannelStoreOptions, Receipts } from "./channel.ts";
 export type {
   Ack,
   AckPayload,

@@ -49,6 +49,36 @@ export async function readJson(req) {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
+/**
+ * Mint a Core session for `framework_ref` — the single call that uses the
+ * tenant key. Returns Core's full `{ token, session_id, character, device }`.
+ * Throws on failure with `.status`/`.payload` set to Core's response so callers
+ * can forward the real reason. Shared by `/join` and the lobby bot (bot.mjs).
+ */
+export async function mintSession(framework_ref) {
+  let core;
+  try {
+    core = await fetch(`${CORE_URL}/v1/tenants/self/sessions`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${API_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ framework_ref }),
+    });
+  } catch {
+    const err = new Error("core unreachable");
+    err.status = 502;
+    err.payload = { code: "internal", msg: "core unreachable" };
+    throw err;
+  }
+  const payload = await core.json().catch(() => null);
+  if (core.status !== 200 || !payload) {
+    const err = new Error(`mint failed (${core.status})`);
+    err.status = core.status || 502;
+    err.payload = payload ?? { code: "internal", msg: "bad core response" };
+    throw err;
+  }
+  return payload;
+}
+
 /** `POST /join { name }` → mint a Core session, return `{ token, session_id, character }`. */
 export async function handleJoin(req, res) {
   let body;
@@ -63,22 +93,12 @@ export async function handleJoin(req, res) {
     return sendJson(res, 400, { code: "invalid", msg: "name must be a string of length 1..=128" });
   }
 
-  let core;
+  let payload;
   try {
-    core = await fetch(`${CORE_URL}/v1/tenants/self/sessions`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${API_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ framework_ref: name }),
-    });
-  } catch {
-    return sendJson(res, 502, { code: "internal", msg: "core unreachable" });
-  }
-
-  const payload = await core.json().catch(() => null);
-
-  // Forward Core errors faithfully so the browser sees the real reason.
-  if (core.status !== 200 || !payload) {
-    return sendJson(res, core.status || 502, payload ?? { code: "internal", msg: "bad core response" });
+    payload = await mintSession(name);
+  } catch (e) {
+    // Forward Core's status + body faithfully so the browser sees the real reason.
+    return sendJson(res, e.status ?? 502, e.payload ?? { code: "internal", msg: "mint failed" });
   }
 
   console.log(`mint: name=${name} character.number=${payload.character?.number}`);

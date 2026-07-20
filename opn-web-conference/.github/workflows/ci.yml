@@ -31,5 +31,5 @@ jobs:
         with:
           node-version: "22"
       - run: npm install
-      # TODO(W3): run the real-Core smoke — start the opn-core dev stack, then `npm run smoke`.
+      # TODO(W3): run the real-Core smokes — start the opn-core dev stack, then `npm run smoke` and `npm run smoke:w1`.
       - run: npm test

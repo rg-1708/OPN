@@ -16,7 +16,8 @@
     "start": "node --env-file-if-exists=.env deploy/server.mjs",
     "typecheck": "tsc -p packages/client && tsc -p app",
     "test": "node --test 'packages/client/test/**/*.test.ts'",
-    "smoke": "node --env-file-if-exists=.env scripts/smoke.mjs"
+    "smoke": "node --env-file-if-exists=.env scripts/smoke.mjs",
+    "smoke:w1": "node --env-file-if-exists=.env scripts/smoke-w1.mjs"
   },
   "devDependencies": {
     "typescript": "^5.7.0",

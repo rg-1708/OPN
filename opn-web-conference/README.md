@@ -1,15 +1,16 @@
 # opn-web-conference
 
 A deliberately tiny, pure-browser app you **fork into a private repo**: join with a
-name, and — in later sprints — chat in rooms and place 1:1 A/V calls. Its real job
+name, chat in rooms, and — in a later sprint — place 1:1 A/V calls. Its real job
 is to be the **first consumer of the OPN data plane**: it exercises auth, the WS
 lifecycle, resume, channels, presence, notify, and calls signaling against a stock
 Core. Two things outlive the demo UI: `@opn/client` (the framework-agnostic wire
 runtime) and a living proof that *any* UI can be built against the contracts.
 
-> **Status: Sprint W0 only.** What's implemented today is the scaffold, `dev-auth`,
-> the wire client, and an app shell that authenticates and holds a self-healing
-> session. Chat/rooms (W1), calls (W2), and packaging polish (W3) are not built
+> **Status: Sprints W0–W1 built.** What's implemented today is the scaffold,
+> `dev-auth` (now with a lobby), the wire client (now with a chat store), and an
+> app that authenticates, holds a self-healing session, and walks
+> lobby → rooms → live chat. Calls (W2) and packaging polish (W3) are not built
 > yet. See the [roadmap](#status--roadmap).
 
 ## Architecture
@@ -33,6 +34,31 @@ same-origin, so the page only ever talks to its own origin:
 - **Durable deliverables** (you keep these after forking): `@opn/client` — the wire
   runtime (connect, auth, cmd/ack, refresh, reconnect+resume, dedupe) — and
   `@opn/contracts` — the TS wire types.
+
+## Rooms & live chat
+
+**Rooms** are Core group channels; **live chat** runs over them. `dev-auth` grew a
+small lobby — `GET`/`POST /rooms`, `POST /rooms/:id/join`, `GET /rooms/:id/members`
+— so the browser can discover, create, and join rooms. The roster is in-memory: a
+dev-auth restart loses the lobby list, but the channels themselves survive in Core.
+In dev these ride Vite's same-origin proxy (and `deploy/server.mjs` in prod): the
+browser also talks to `/rooms` (→ dev-auth) and `/v1` (→ Core REST, for channel
+history).
+
+Because Core gates channel membership (`channels.create`/`member_add` are WS-only,
+and `member_add` requires the actor to already be a member), the open-join flow
+needs an authority that belongs to every room. That's the **lobby bot**: one
+`__lobby__` Core WS session `dev-auth` holds, which creates each room and adds every
+joiner. It's a test-rig mechanism — a real fork replaces it with the operator's own
+lobby/auth.
+
+Chat itself is the new `@opn/client` `ChannelStore` (`createChannelStore`):
+optimistic send with `client_uuid` idempotency, seq-ordered reconciliation (a
+message never re-orders after its ack), resend-the-same-`client_uuid` on reconnect
+(dedupe), HTTP history load on room open, typing indicators, watermark receipts
+(auto `mark_delivered`, `mark_read` on focus), and per-member presence dots. A
+`notify.event` toast fires for messages in rooms you're a member of but aren't
+currently viewing.
 
 ## The 15-minute path
 
@@ -60,10 +86,14 @@ same-origin, so the page only ever talks to its own origin:
    ```bash
    npm run dev
    ```
-7. **Watch it work.** Open **two browser tabs**, join as two different names, and
-   watch both reach the green **live** state.
+7. **Watch it work.** Open **two browser tabs** and join as two different names —
+   both reach the green **live** state. Then:
+   - **Rooms & chat:** in one tab, **create a room**; **join it** from the other
+     tab, and chat. Messages appear **in order** on both sides, and **presence
+     dots** and **read receipts** update live.
    - **Self-healing:** kill and restart Core — both tabs go
-     **reconnecting → live** without a page reload.
+     **reconnecting → live** without a page reload, and chat **resumes with no
+     duplicates**.
    - **Takeover:** open a **third tab as the same name** as an existing tab; the
      first tab surfaces **taken over**.
 
@@ -96,7 +126,9 @@ session (auto-refresh, reconnect+resume).
 - **`dev-auth/`** — a placeholder for **your** auth. It mirrors the FXServer's
   session-minting role; swap it for however your app authenticates users and mints
   Core sessions.
-- **The in-memory rooms/lobby** (arriving in W1) — a placeholder for **your** lobby.
+- **The in-memory rooms/lobby and the lobby bot** — placeholders for **your**
+  lobby. The roster lives in `dev-auth` memory, and the `__lobby__` bot exists only
+  because Core gates channel membership; a real operator's lobby/auth replaces both.
 - **Keep `@opn/client` and `@opn/contracts`.** Those are the durable pieces.
 
 ## Contracts note
@@ -115,11 +147,14 @@ and delete the vendored copy. Details: [`packages/contracts/README.md`](packages
 | `npm run dev`       | Start the Vite app (proxies to dev-auth + Core).                         |
 | `npm test`          | Run the `@opn/client` unit tests (`node --test`, zero deps).            |
 | `npm run typecheck` | `tsc` over the client + app projects.                                                                |
+| `npm run smoke`     | W0 wire smoke: mint a session and reach `live` against a dockerized Core. |
+| `npm run smoke:w1`  | W1 rooms + live-chat smoke: two sessions round-trip over a `ChannelStore` against a dockerized Core. |
 
 ## Status / roadmap
 
-- **W0 — done (this):** scaffold, dev-auth, wire client, app shell that
+- **W0 — done:** scaffold, dev-auth, wire client, app shell that
   authenticates and holds a self-healing session.
-- **W1:** rooms & chat.
+- **W1 — done:** rooms & live chat — a `dev-auth` lobby (+ lobby bot) over Core
+  group channels, and live chat via the `@opn/client` `ChannelStore`.
 - **W2:** 1:1 A/V calls.
 - **W3:** packaging polish.

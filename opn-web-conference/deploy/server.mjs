@@ -18,6 +18,7 @@ import { readFile } from "node:fs/promises";
 import { extname, join, normalize, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertEnv, CORE_URL, handleJoin, sendJson } from "../dev-auth/join.mjs";
+import { routeRooms } from "../dev-auth/rooms.mjs";
 
 assertEnv();
 const PORT = Number(process.env.PORT) || 8080;
@@ -67,16 +68,45 @@ async function serveStatic(req, res) {
   }
 }
 
+// Reverse-proxy a same-origin HTTP request to Core, forwarding the browser's
+// Authorization (JWT). Used for /v1 reads (channel history) so the browser never
+// needs Core's URL. Streams the body through untouched.
+function proxyToCore(req, res) {
+  const proxyReq = coreLib.request(
+    {
+      hostname: core.hostname,
+      port: corePort,
+      path: req.url,
+      method: req.method,
+      headers: { ...req.headers, host: core.host },
+    },
+    (coreRes) => {
+      res.writeHead(coreRes.statusCode ?? 502, coreRes.headers);
+      coreRes.pipe(res);
+    },
+  );
+  proxyReq.on("error", (e) => {
+    console.error(`v1 proxy: cannot reach Core (${e.message})`);
+    sendJson(res, 502, { code: "internal", msg: "core unreachable" });
+  });
+  req.pipe(proxyReq);
+}
+
 const server = createServer((req, res) => {
-  if (req.method === "GET" && req.url === "/healthz") {
+  const { pathname } = new URL(req.url, "http://localhost");
+  if (req.method === "GET" && pathname === "/healthz") {
     return sendJson(res, 200, { ok: true });
   }
-  if (req.url === "/join") {
+  if (pathname === "/join") {
     if (req.method !== "POST") {
       return sendJson(res, 405, { code: "invalid", msg: "use POST /join" });
     }
     return handleJoin(req, res);
   }
+  // Lobby roster (W1) — same handlers as the dev sidecar.
+  if (routeRooms(req, res, pathname)) return;
+  // Core REST reads (channel history): forward to Core with the browser's JWT.
+  if (pathname.startsWith("/v1/")) return proxyToCore(req, res);
   return serveStatic(req, res);
 });
 

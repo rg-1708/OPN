@@ -1,88 +1,118 @@
 import "./style.css";
-import { connect, type ConnectionState } from "@opn/client";
-import type { CharacterInfo } from "@opn/contracts";
+import { connect, type ConnectionState, type OpnConnection, type Push } from "@opn/client";
+import type { MePayload } from "@opn/contracts";
+import { api, type RoomSummary } from "./api.ts";
+import { mountRoom, type RoomController } from "./room.ts";
+import { escapeHtml, stateBadge } from "./ui.ts";
 
-// The dev-auth `/join` reply (device is stripped by the sidecar — see dev-auth).
-interface JoinResponse {
-  token: string;
-  session_id: string;
-  character: CharacterInfo;
-}
-interface JoinError {
-  code: string;
-  msg: string;
-}
+// App controller (roadmap W1): name form → lobby (create/join rooms) → room
+// (live chat). Owns the one connection; the room view owns its ChannelStore.
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
 
-/** Same-origin: Vite proxies `/join` to the dev-auth sidecar. */
-async function join(name: string): Promise<JoinResponse> {
-  const res = await fetch("/join", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name }),
-  });
-  if (!res.ok) {
-    const err = (await res.json().catch(() => null)) as JoinError | null;
-    throw new Error(err?.msg ?? `join failed (${res.status})`);
-  }
-  return (await res.json()) as JoinResponse;
+interface Self {
+  id: string;
+  name: string;
+  number: string | null;
 }
 
-/** WS URL derived from the current page — Vite proxies `/ws` to Core. */
+let conn: OpnConnection | null = null;
+let me: Self | null = null;
+let room: RoomController | null = null;
+let currentRoomId: string | null = null;
+let lastName = "";
+const roomNames = new Map<string, string>(); // id → name, for notify toasts
+
+/** WS URL from the current page — Vite/deploy proxy `/ws` to Core. */
 function wsUrl(): string {
   const scheme = location.protocol === "https:" ? "wss" : "ws";
   return `${scheme}://${location.host}/ws`;
 }
 
-// Distinct label + Tailwind classes per connection state. Full class strings
-// (not built up) so Tailwind v4's content scan actually emits them.
-const STATE_META: Record<ConnectionState, { label: string; cls: string }> = {
-  connecting: { label: "Connecting…", cls: "bg-amber-100 text-amber-800 ring-amber-300" },
-  live: { label: "Live", cls: "bg-green-100 text-green-800 ring-green-300" },
-  reconnecting: { label: "Reconnecting…", cls: "bg-amber-100 text-amber-800 ring-amber-300 animate-pulse" },
-  taken_over: { label: "Session opened in another tab", cls: "bg-red-100 text-red-800 ring-red-300" },
-  closed: { label: "Closed", cls: "bg-gray-200 text-gray-700 ring-gray-300" },
-};
-
-function escapeHtml(s: string): string {
-  return s.replace(/[&<>"']/g, (c) =>
-    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!,
-  );
+/** Resolve once the connection is live; reject if it dies first. */
+function waitLive(c: OpnConnection): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (c.state === "live") return resolve();
+    const off = c.onState((s) => {
+      if (s === "live") {
+        off();
+        resolve();
+      } else if (s === "closed" || s === "taken_over") {
+        off();
+        reject(new Error(s === "taken_over" ? "session opened in another tab" : "connection closed"));
+      }
+    });
+  });
 }
 
-interface Session {
-  conn: ReturnType<typeof connect>;
-  unsub: () => void;
-  info: JoinResponse;
+function disposeRoom(): void {
+  room?.dispose();
+  room = null;
 }
-let session: Session | null = null;
-let lastName = "";
 
 function teardown(): void {
-  if (!session) return;
-  session.unsub();
-  session.conn.close();
-  session = null;
+  disposeRoom();
+  conn?.close();
+  conn = null;
+  me = null;
+  currentRoomId = null;
 }
+
+// ── session ────────────────────────────────────────────────────────────────
 
 async function doJoin(name: string): Promise<void> {
   lastName = name;
-  teardown(); // drop any prior connection (e.g. a taken-over one on rejoin)
-  const info = await join(name);
-  const conn = connect({
+  teardown();
+  const info = await api.join(name);
+  const c = connect({
     url: wsUrl(),
     token: info.token,
-    // Re-mint on hard auth loss. ponytail: session_id/number shown stay from the
-    // first mint — refreshing the panel identity on remint is a later sprint.
-    remint: async () => (await join(name)).token,
+    // Re-mint on hard auth loss by re-joining under the same name.
+    remint: async () => (await api.join(name)).token,
   });
-  const unsub = conn.onState((s) => paintSession(info, s));
-  session = { conn, unsub, info };
-  paintSession(info, conn.state); // onState doesn't fire on subscribe — paint now
+  conn = c;
+  await waitLive(c);
+
+  const payload = (await c.cmd({ cmd: "identity.me" })) as MePayload;
+  me = {
+    id: payload.character.id,
+    name: payload.character.framework_ref,
+    number: payload.character.number,
+  };
+  // Presence dots only mean something if this character shares presence.
+  await c.cmd({ cmd: "identity.set_share_presence", payload: { on: true } }).catch(() => {});
+  // Notify surface: the topic the W2 call-ring pushes to. (In W1 a chat message
+  // never notifies an *online* member — Core skips them — so this stays quiet
+  // between two open tabs; it's wired here as the surface, per the roadmap.)
+  const notifyTopic = `notify:${payload.device.id}`;
+  c.on(notifyTopic, onNotify);
+  await c.sub(notifyTopic).catch(() => {});
+
+  c.onState(onGlobalState);
+  showLobby();
 }
 
+function onGlobalState(s: ConnectionState): void {
+  const badge = document.querySelector("#conn-state");
+  if (badge) badge.innerHTML = stateBadge(s);
+  if (s === "taken_over") {
+    teardown();
+    showForm("This session was taken over by another tab. Rejoin to continue here.");
+  }
+}
+
+function onNotify(push: Push): void {
+  if (push.evt !== "notify.event") return;
+  const p = push.payload.payload as { channel_id?: string } | null;
+  if (p?.channel_id && p.channel_id === currentRoomId) return; // you're looking at it
+  const where = p?.channel_id ? (roomNames.get(p.channel_id) ?? "another room") : "an app";
+  toast(`New activity in ${where}`);
+}
+
+// ── views ──────────────────────────────────────────────────────────────────
+
 function showForm(errorMsg?: string): void {
+  disposeRoom();
   app.innerHTML = `
     <main class="min-h-screen grid place-items-center bg-gray-50 text-gray-900">
       <form id="join-form" class="w-80 flex flex-col gap-3 rounded-xl bg-white p-6 shadow">
@@ -114,45 +144,137 @@ function showForm(errorMsg?: string): void {
   });
 }
 
-function paintSession(info: JoinResponse, state: ConnectionState): void {
-  const meta = STATE_META[state];
-  const c = info.character;
-  const takenOver = state === "taken_over";
+function showLobby(errorMsg?: string): void {
+  disposeRoom();
+  currentRoomId = null;
+  if (!me || !conn) return;
   app.innerHTML = `
-    <main class="min-h-screen grid place-items-center bg-gray-50 text-gray-900">
-      <section class="flex w-96 flex-col gap-4 rounded-xl bg-white p-6 shadow">
-        <div class="flex items-center justify-between gap-2">
-          <h1 class="text-lg font-semibold">Session</h1>
-          <span class="rounded-full px-3 py-1 text-sm font-medium ring-1 ${meta.cls}">${escapeHtml(meta.label)}</span>
-        </div>
-        ${takenOver
-          ? `<p class="rounded-md bg-red-50 p-3 text-sm text-red-700">This session was taken over by another tab. Rejoin to continue here.</p>`
-          : ""}
-        <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
-          <dt class="text-gray-500">Name</dt>
-          <dd class="font-medium">${escapeHtml(c.framework_ref)}</dd>
-          <dt class="text-gray-500">Number</dt>
-          <dd>${c.number ? escapeHtml(c.number) : `<span class="text-gray-400">no number</span>`}</dd>
-          <dt class="text-gray-500">Session</dt>
-          <dd class="break-all font-mono text-xs">${escapeHtml(info.session_id)}</dd>
-        </dl>
-        <div class="flex gap-2">
-          ${takenOver
-            ? `<button id="rejoin-btn" class="rounded-md bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700">Rejoin</button>`
-            : ""}
-          <button id="leave-btn" class="rounded-md border border-gray-300 px-3 py-2 text-sm hover:bg-gray-100">Leave</button>
-        </div>
-      </section>
+    <main class="min-h-screen bg-gray-50 text-gray-900">
+      <div class="mx-auto flex max-w-2xl flex-col gap-4 p-6">
+        <header class="flex items-center justify-between gap-2">
+          <div>
+            <h1 class="text-lg font-semibold">Rooms</h1>
+            <p class="text-sm text-gray-500">${escapeHtml(me.name)}${
+              me.number ? ` · ${escapeHtml(me.number)}` : ""
+            }</p>
+          </div>
+          <div class="flex items-center gap-2">
+            <span id="conn-state">${stateBadge(conn.state)}</span>
+            <button id="leave" class="rounded-md border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-100">Leave</button>
+          </div>
+        </header>
+
+        <form id="create" class="flex gap-2">
+          <input id="room-name" type="text" placeholder="new room name" autocomplete="off"
+            class="flex-1 rounded-md border border-gray-300 px-3 py-2 outline-none focus:ring-2 focus:ring-blue-400" />
+          <button type="submit" class="rounded-md bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-700">Create</button>
+        </form>
+        ${errorMsg ? `<p class="text-sm text-red-600">${escapeHtml(errorMsg)}</p>` : ""}
+
+        <section class="rounded-xl bg-white shadow">
+          <div class="flex items-center justify-between border-b border-gray-100 px-4 py-2">
+            <h2 class="text-sm font-semibold text-gray-600">Open rooms</h2>
+            <button id="refresh" class="text-sm text-blue-600 hover:underline">Refresh</button>
+          </div>
+          <ul id="room-list" class="divide-y divide-gray-100">
+            <li class="px-4 py-3 text-sm text-gray-400">Loading…</li>
+          </ul>
+        </section>
+      </div>
     </main>`;
-  app.querySelector<HTMLButtonElement>("#leave-btn")!.addEventListener("click", () => {
+
+  app.querySelector<HTMLButtonElement>("#leave")!.addEventListener("click", () => {
     teardown();
     showForm();
   });
-  app.querySelector<HTMLButtonElement>("#rejoin-btn")?.addEventListener("click", () => {
-    doJoin(lastName).catch((err: unknown) => {
-      showForm(err instanceof Error ? err.message : "rejoin failed");
-    });
+  app.querySelector<HTMLButtonElement>("#refresh")!.addEventListener("click", () => void loadRooms());
+
+  const createForm = app.querySelector<HTMLFormElement>("#create")!;
+  const roomInput = app.querySelector<HTMLInputElement>("#room-name")!;
+  createForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const name = roomInput.value.trim();
+    if (!name || !me) return;
+    api
+      .createRoom(name, me.id, me.name)
+      .then((r) => enterRoom(r.id, r.name))
+      .catch((err: unknown) => showLobby(err instanceof Error ? err.message : "could not create room"));
   });
+
+  // Enter a room from the list (event-delegated).
+  app.querySelector<HTMLUListElement>("#room-list")!.addEventListener("click", (e) => {
+    const btn = (e.target as HTMLElement).closest<HTMLButtonElement>("button[data-id]");
+    if (!btn) return;
+    enterRoom(btn.dataset.id!, btn.dataset.name!);
+  });
+
+  void loadRooms();
+}
+
+async function loadRooms(): Promise<void> {
+  const list = app.querySelector<HTMLUListElement>("#room-list");
+  if (!list) return;
+  let rooms: RoomSummary[];
+  try {
+    rooms = await api.listRooms();
+  } catch {
+    list.innerHTML = `<li class="px-4 py-3 text-sm text-red-600">Could not load rooms.</li>`;
+    return;
+  }
+  for (const r of rooms) roomNames.set(r.id, r.name);
+  list.innerHTML = rooms.length
+    ? rooms
+        .map(
+          (r) => `
+        <li class="flex items-center justify-between px-4 py-3">
+          <div>
+            <div class="font-medium">${escapeHtml(r.name)}</div>
+            <div class="text-xs text-gray-400">${r.member_count} member${r.member_count === 1 ? "" : "s"}</div>
+          </div>
+          <button data-id="${escapeHtml(r.id)}" data-name="${escapeHtml(r.name)}"
+            class="rounded-md border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-100">Enter</button>
+        </li>`,
+        )
+        .join("")
+    : `<li class="px-4 py-6 text-center text-sm text-gray-400">No rooms yet — create one above.</li>`;
+}
+
+function enterRoom(roomId: string, name: string): void {
+  if (!me || !conn) return;
+  const c = conn;
+  const self = me;
+  roomNames.set(roomId, name);
+  Promise.all([api.joinRoom(roomId, self.id, self.name), api.members(roomId)])
+    .then(([, members]) => {
+      disposeRoom();
+      currentRoomId = roomId;
+      room = mountRoom({
+        el: app,
+        conn: c,
+        roomId,
+        roomName: name,
+        self: { id: self.id, name: self.name },
+        members,
+        onLeave: () => showLobby(),
+      });
+    })
+    .catch((err: unknown) => showLobby(err instanceof Error ? err.message : "could not enter room"));
+}
+
+// ── toast ────────────────────────────────────────────────────────────────────
+
+let toastHost: HTMLDivElement | null = null;
+function toast(msg: string): void {
+  if (!toastHost) {
+    toastHost = document.createElement("div");
+    toastHost.className = "fixed bottom-4 right-4 z-50 flex flex-col gap-2";
+    document.body.appendChild(toastHost);
+  }
+  const el = document.createElement("div");
+  el.className = "rounded-md bg-gray-900 px-4 py-2 text-sm text-white shadow-lg";
+  el.textContent = msg;
+  toastHost.appendChild(el);
+  setTimeout(() => el.remove(), 4_000);
 }
 
 showForm();
