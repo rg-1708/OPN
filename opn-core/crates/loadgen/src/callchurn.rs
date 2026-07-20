@@ -80,7 +80,12 @@ pub(crate) async fn run_calls(
         read_deadline,
     )));
 
+    // Stagger pair phases across one period — same de-phasing as the message
+    // driver: a shared start_at fires every pair's call lifecycle on the same
+    // tick, one aligned burst per period instead of a steady calls/s stream.
+    let pairs = (sessions.len() / 2).max(1);
     let mut it = sessions.into_iter();
+    let mut pair_idx = 0usize;
     while let (Some(caller), Some(callee)) = (it.next(), it.next()) {
         handles.push(tokio::spawn(run_call_pair(PairConfig {
             ws_url: ws_url.clone(),
@@ -89,10 +94,11 @@ pub(crate) async fn run_calls(
             callee_number: callee.number,
             caller_char: caller.char_id,
             callee_char: callee.char_id,
-            start_at,
+            start_at: start_at + period.mul_f64(pair_idx as f64 / pairs as f64),
             send_deadline,
             period,
         })));
+        pair_idx += 1;
     }
 
     Ok(futures_util::future::join_all(handles).await)

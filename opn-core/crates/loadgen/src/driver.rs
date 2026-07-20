@@ -421,9 +421,10 @@ async fn drive(cfg: ConnConfig) -> Result<ConnStats> {
     let mut trackers: HashMap<Uuid, SeqTracker> = HashMap::new();
     let mut send_count: u64 = 0;
 
-    // First tick fires exactly at the shared `start_at`, so every connection
-    // starts sending together regardless of how long its setup took. It persists
-    // across epochs; `MissedTickBehavior::Delay` means the ticks missed while a
+    // First tick fires at this connection's `start_at` — the shared warmup
+    // barrier plus a per-conn phase stagger (see main.rs), so the aggregate is
+    // a uniform stream, not one aligned burst per period. It persists across
+    // epochs; `MissedTickBehavior::Delay` means the ticks missed while a
     // connection was offline don't burst on reconnect.
     let mut tick = interval_at(cfg.start_at, cfg.period);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);

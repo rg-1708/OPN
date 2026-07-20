@@ -320,13 +320,19 @@ async fn run_scenario(path: &str) -> Result<ExitCode> {
         scenario.duration_secs
     );
 
-    let base = |token, char_id, pairing, rc_delay| ConnConfig {
+    // Stagger each connection's first tick across one full period so the
+    // aggregate is a uniform total_msgs_per_sec stream. A shared start_at
+    // phase-locks every conn onto the same tick — a `conns`-sized burst each
+    // period — and the measured ack p99 becomes the burst's queue-drain time,
+    // not steady-state latency (the giveaway shape: p50 ≈ p99/2, uniform).
+    let stagger = |i: usize| period.mul_f64(i as f64 / conns as f64);
+    let base = |i: usize, token, char_id, pairing, rc_delay| ConnConfig {
         ws_url: scenario.target_ws.clone(),
         token,
         char_id,
         pairing,
         epoch,
-        start_at,
+        start_at: start_at + stagger(i),
         send_deadline,
         read_deadline,
         period,
@@ -351,6 +357,7 @@ async fn run_scenario(path: &str) -> Result<ExitCode> {
         let member_ids: Vec<Uuid> = members.iter().map(|m| m.char_id).collect();
         let (txs, rxs): (Vec<_>, Vec<_>) = members.iter().map(|_| oneshot::channel()).unzip();
         handles.push(tokio::spawn(run_connection(base(
+            0,
             creator.token,
             creator.char_id,
             Pairing::GroupCreator { member_ids, txs },
@@ -358,6 +365,7 @@ async fn run_scenario(path: &str) -> Result<ExitCode> {
         ))));
         for (i, (m, rx)) in members.into_iter().zip(rxs).enumerate() {
             handles.push(tokio::spawn(run_connection(base(
+                i + 1,
                 m.token,
                 m.char_id,
                 Pairing::Right { rx },
@@ -371,6 +379,7 @@ async fn run_scenario(path: &str) -> Result<ExitCode> {
         while let (Some(left), Some(right)) = (sessions.next(), sessions.next()) {
             let (tx, rx) = oneshot::channel();
             handles.push(tokio::spawn(run_connection(base(
+                idx,
                 left.token,
                 left.char_id,
                 Pairing::Left {
@@ -380,6 +389,7 @@ async fn run_scenario(path: &str) -> Result<ExitCode> {
                 reconnect_delay(idx),
             ))));
             handles.push(tokio::spawn(run_connection(base(
+                idx + 1,
                 right.token,
                 right.char_id,
                 Pairing::Right { rx },
