@@ -1,0 +1,14 @@
+{
+  "_comment": "Sprint 10 item 1 'soak10x': 10x the 'design' scenario (3000 conns, 300 msg/s aggregate) run for 24h as the §15 release-gate soak. assert_ack_p99_ms is intentionally OMITTED (left null) until item 7 tightens the ack-p99 gate to measured-p99 + 50% after the profiling/fix loop — asserting an unmeasured threshold is wrong. Item 6's soak targets — RSS slope ≈ 0, fd count flat, p99 in hour 24 within 20% of hour 1, zero janitor failures — are operator-OBSERVED during the run, not loadgen assertions; loadgen only asserts the delivery invariants (assert_no_seq_gaps, assert_no_durable_closes). warmup_secs is long because 3000 connections need a wide setup barrier before the aligned first send. api_key injected via OPN_LOADGEN_API_KEY. The _comment is an unknown field the Scenario struct ignores via serde (same pattern as design.json).",
+  "target_http": "http://127.0.0.1:8080",
+  "target_ws": "ws://127.0.0.1:8080/ws",
+  "api_key": "",
+  "connections": 3000,
+  "duration_secs": 86400,
+  "total_msgs_per_sec": 300.0,
+  "warmup_secs": 30,
+  "typing_every": 10,
+  "read_every": 20,
+  "assert_no_durable_closes": true,
+  "assert_no_seq_gaps": true
+}

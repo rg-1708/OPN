@@ -13,6 +13,12 @@ path = "src/main.rs"
 anyhow = "1"
 contracts = { path = "../contracts" }
 futures-util = "0.3"
+# Bounded, fixed-memory latency percentiles (roadmap Sprint 4 item 9's named
+# tool). Replaces the unbounded per-sample Vec so the 24 h soak (tens of
+# millions of samples) is memory-safe. default-features=false drops the
+# serialization/sync features (and their flate2/nom/base64/crossbeam deps),
+# leaving just num-traits — smaller tree, cleaner cargo-deny surface.
+hdrhistogram = { version = "7", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util", "sync"] }

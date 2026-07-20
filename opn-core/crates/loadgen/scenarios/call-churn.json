@@ -1,0 +1,14 @@
+{
+  "_comment": "Sprint 10 item 1 'call-churn': 50 concurrent calls starting/ending at 1 Hz with signaling — exercises the call FSM plus the /link relay under load. calls=true selects the call-churn driver mode instead of the paired-DM message driver. connections=100 is 50 caller/callee PAIRS (rounded to even; one task per pair owns both sockets), i.e. the roadmap's '50 concurrent calls'; PLUS one shared /link consumer connection the driver opens for the whole tenant (not counted in `connections`). calls_per_sec=1.0 is the PER-PAIR call rate — each pair runs one full call lifecycle (`calls.start` → callee `calls.accept` → `calls.signal` both directions → both `calls.hangup`) per second, so 50 pairs ≈ 50 calls/s aggregate, the '1 Hz' churn. total_msgs_per_sec is REQUIRED by the Scenario struct but UNUSED in calls mode — the message-send period it computes is never used, calls pacing comes from calls_per_sec — set 1.0. warmup_secs=15 is the setup barrier so the link consumer plus all 100 party sockets connect+auth before the aligned first call. assert_calls=true is the NON-VACUITY gate: fail if zero calls completed OR the /link consumer received zero `set_targets` (the FSM never ran or the link relay never fired) — mirrors reconnect-storm's assert_reconnected / pg-restart's assert_error_acks. assert_no_durable_closes=true guards the /link consumer AND every party socket against a 4409 slow-consumer close under the churn: the link receiving ~50 set_targets/s + ~50 clears/s (durable events) must never be closed. assert_ack_p99_ms is OMITTED on purpose: the `ack` histogram measures call-setup latency here, and item 7 tightens perf gates to measured-p99 + margin only AFTER the fix loop — asserting an unmeasured threshold is wrong (same call as soak10x.json / hot-channel.json). This committed file is the real 100-conn/50-pair spec (soak10x / reconnect-storm / hot-channel precedent: commit the spec, the heavy pinned-hardware run is the operator's pass; the machinery is verified at small scale on the dev host). api_key injected via OPN_LOADGEN_API_KEY. Run: `just perf call-churn`.",
+  "target_http": "http://127.0.0.1:8080",
+  "target_ws": "ws://127.0.0.1:8080/ws",
+  "api_key": "",
+  "connections": 100,
+  "duration_secs": 120,
+  "total_msgs_per_sec": 1.0,
+  "warmup_secs": 15,
+  "calls": true,
+  "calls_per_sec": 1.0,
+  "assert_calls": true,
+  "assert_no_durable_closes": true
+}

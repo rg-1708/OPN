@@ -1,0 +1,17 @@
+{
+  "_comment": "Sprint 10 item 1 'reconnect-storm': a thundering-herd resume test. 10x/3000-conn design-rate load (matching the roadmap's 'drop all 3000') runs for 90s; at reconnect_at_secs=40 every connection drops its socket and reconnects after a deterministic 0..reconnect_jitter_secs stagger (OPN.md §7's 0-3s jitter), then resumes with `sub last_seq` to replay the gap. The gated invariant is seq continuity PER CLIENT THROUGH the reconnect: assert_no_seq_gaps fails if any resume dropped a message (roadmap item 6: 'no replay gaps'). assert_reconnected is the non-vacuity guard — fail if the storm never fired (mirrors pg-restart's assert_error_acks). assert_no_durable_closes guards the reconnected sockets too. The 'all 3000 resumed within 60s' target is MEASURED (resume_* percentiles in the summary), not hard-gated — item 7 tightens perf thresholds after the fix loop measures them (same call as design.json / soak10x.json). warmup_secs=30 gives 3000 conns a wide setup barrier (same as soak10x). This committed file is the real 3000-conn spec (soak10x precedent: commit the spec, the heavy run is the operator's pinned-hardware pass); the machinery was locally verified at 20 conns. api_key injected via OPN_LOADGEN_API_KEY. Run: `just perf reconnect-storm`.",
+  "target_http": "http://127.0.0.1:8080",
+  "target_ws": "ws://127.0.0.1:8080/ws",
+  "api_key": "",
+  "connections": 3000,
+  "duration_secs": 90,
+  "total_msgs_per_sec": 300.0,
+  "warmup_secs": 30,
+  "typing_every": 10,
+  "read_every": 20,
+  "reconnect_at_secs": 40,
+  "reconnect_jitter_secs": 3.0,
+  "assert_reconnected": true,
+  "assert_no_durable_closes": true,
+  "assert_no_seq_gaps": true
+}

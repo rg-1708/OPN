@@ -15,7 +15,14 @@ jobs:
       run:
         working-directory: opn-core
     env:
-      DATABASE_URL: postgres://opn_migrate:opn@localhost:5432/opn
+      # Runtime Core serves domain traffic as the least-privilege app role
+      # (NOSUPERUSER, NOBYPASSRLS) so the smoke exercises the real RLS-enforced
+      # path, exactly as production does — not as the migrate superuser, which
+      # bypasses row-level security (cross-cutting rule 4). Startup migrations
+      # still run via OPN_MIGRATE_DATABASE_URL (the owner role); the janitor's
+      # partition maintenance reaches the owner through a SECURITY DEFINER
+      # function granted to opn_app, so nothing at runtime needs the superuser.
+      DATABASE_URL: postgres://opn_app:opn@localhost:5432/opn
       OPN_MIGRATE_DATABASE_URL: postgres://opn_migrate:opn@localhost:5432/opn
       REDIS_URL: redis://localhost:6379
       S3_ENDPOINT: http://localhost:9000

@@ -55,11 +55,12 @@ PERF_CPUSET := "12-19"
 
 # Sprint 10 production-shaped perf run (roadmap item 3). Like `just chaos` this
 # orchestrates its own compose stack, so on the dev host run it under the docker
-# group:  sg docker -c 'just perf'
-# (crates/loadgen/scenarios/design.json is owned by the loadgen crate — this
-# recipe only references it.)
-# Runs the `design` scenario end to end; its JSON summary lands in perf/results/.
-perf:
+# group:  sg docker -c 'just perf'            (design scenario, the default)
+#         sg docker -c 'just perf soak10x'    (the 24 h 10x soak — operator run)
+# The scenario file crates/loadgen/scenarios/<scenario>.json is owned by the
+# loadgen crate; this recipe only references it. Its JSON summary lands in
+# perf/results/<date>-<scenario>.json with the loadgen exit code preserved.
+perf scenario="design":
     #!/usr/bin/env bash
     set -euo pipefail
 
@@ -91,9 +92,12 @@ perf:
     export OPN_JWT_SECRET=perf-secret
     export OPN_BIND=127.0.0.1:8080
     export OPN_METRICS_BIND=127.0.0.1:9090
-    # 300 conns from one IP would trip the default per-IP pre-auth cap; raise it
-    # above the connection count (same as perf-smoke.yml).
-    export OPN_PREAUTH_PER_IP_MAX='400'
+    # All loadgen conns come from one IP; raise both pre-auth caps (per-IP
+    # default 5, global default 1000) above any scenario's connection count so
+    # the trusted single-source generator is never admission-throttled. 4000
+    # covers design (300) and soak10x (3000).
+    export OPN_PREAUTH_PER_IP_MAX='4000'
+    export OPN_PREAUTH_GLOBAL_MAX='4000'
 
     # Pin Core to the E-cores and cap its tokio runtime at 4 worker threads.
     TOKIO_WORKER_THREADS=4 taskset -c {{PERF_CPUSET}} ./target/release/opn-core > perf-core.log 2>&1 &
@@ -123,11 +127,11 @@ perf:
     fi
     export OPN_LOADGEN_API_KEY="$key"
 
-    # Run the design scenario. Capture the one JSON summary line AND preserve
+    # Run the chosen scenario. Capture the one JSON summary line AND preserve
     # loadgen's exit code — `|| code=$?` instead of a pipe that would mask it.
     mkdir -p perf/results
-    out_file="perf/results/$(date +%Y-%m-%d)-design.json"
+    out_file="perf/results/$(date +%Y-%m-%d)-{{scenario}}.json"
     code=0
-    ./target/release/opn-loadgen --scenario crates/loadgen/scenarios/design.json > "$out_file" || code=$?
+    ./target/release/opn-loadgen --scenario crates/loadgen/scenarios/{{scenario}}.json > "$out_file" || code=$?
     cat "$out_file"
     exit $code

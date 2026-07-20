@@ -7,11 +7,14 @@
 //! Scenario is JSON, not the roadmap's TOML: `serde_json` is already a
 //! workspace dependency, the config is six fields, and a committed named
 //! scenario file — the actual point — works identically. No `toml` crate.
-//! Percentiles are exact from a sorted `Vec`, not `hdrhistogram`: the v0 smoke
-//! is ~9k samples where exact beats bucketed and needs no dependency.
-//! ponytail: the Vec is fine to ~1M samples; Sprint 10's 24 h soak wants
-//! hdrhistogram or reservoir sampling before it records hundreds of millions.
+//! Percentiles come from `hdrhistogram` (roadmap Sprint 4 item 9's named tool):
+//! fixed-memory bucketed quantiles that stay bounded no matter how many samples
+//! land — the v0 sorted-`Vec` was fine to ~1M samples but Sprint 10's 24 h soak
+//! records tens of millions, which the Vec would OOM on. Bucketing costs a
+//! little precision (3 sig figs) for constant memory; the delivery/latency
+//! gates live far above that resolution.
 
+mod callchurn;
 mod driver;
 mod http;
 mod linkdrop;
@@ -22,12 +25,21 @@ use std::collections::{BTreeSet, HashMap};
 use std::process::ExitCode;
 
 use anyhow::{anyhow, bail, Context, Result};
+use futures_util::stream::{StreamExt, TryStreamExt};
+use hdrhistogram::Histogram;
 use serde::Deserialize;
 use tokio::sync::oneshot;
 use tokio::time::{Duration, Instant};
 use uuid::Uuid;
 
 use driver::{run_connection, ConnConfig, ConnStats, Pairing};
+
+/// Seed-phase mint concurrency. Held near the server's connection pool
+/// (`max_connections = 20`) so we saturate it without piling up acquire waits;
+/// higher just queues on `pg` acquire, lower leaves the pool idle. Turns the
+/// 3000-conn soak/hot-channel seed from a minute of serial round trips into
+/// seconds, without changing the index-aligned order the drivers depend on.
+const SEED_CONCURRENCY: usize = 20;
 
 /// A load scenario. Committed as a file (e.g. `scenarios/smoke.json`) so CI and
 /// Sprint 10 reference named, reviewable scenarios rather than ad-hoc flags.
@@ -55,6 +67,48 @@ struct Scenario {
     /// Every Nth send also advances the read watermark (0 = never).
     #[serde(default)]
     read_every: u64,
+    /// hot-channel topology (roadmap Sprint 10 item 1): when true, all
+    /// `connections` join ONE group channel — connection 0 creates it and
+    /// `member_add`s the rest (paced under the Social budget), everyone
+    /// subscribes to that single channel and sends, so each send fans out to
+    /// every member (the fan-out stress shape). `false` (default) is the
+    /// paired-DM graph every other scenario uses.
+    #[serde(default)]
+    group: bool,
+    /// call-churn topology (roadmap Sprint 10 item 1): when true, the paired
+    /// message driver is replaced by the calls driver — every two connections
+    /// form a caller/callee pair that churns a full call lifecycle
+    /// (`calls.start` → `calls.accept` → `calls.signal` both ways → `calls.hangup`)
+    /// at `calls_per_sec`, and one shared `/link` consumer drains the tenant's
+    /// voice-target events. Exercises the call FSM + the `/link` relay under load.
+    /// Mutually exclusive with `group` and `reconnect_at_secs`. `total_msgs_per_sec`
+    /// is ignored in this mode (call pacing comes from `calls_per_sec`).
+    #[serde(default)]
+    calls: bool,
+    /// Per-pair call rate for the call-churn driver (calls/second/pair). 50 pairs
+    /// at 1.0 ≈ 50 calls/s aggregate — the roadmap's "1 Hz" churn. Unused unless
+    /// `calls` is set.
+    #[serde(default = "default_calls_per_sec")]
+    calls_per_sec: f64,
+    /// Non-vacuity gate (call-churn): fail if zero calls completed OR the link
+    /// consumer received zero `set_targets` — i.e. the FSM never ran or the relay
+    /// never fired. Mirrors reconnect-storm's `assert_reconnected`.
+    #[serde(default)]
+    assert_calls: bool,
+    /// reconnect-storm (roadmap Sprint 10 item 1): seconds after send-start when
+    /// every connection drops and reconnects. `None` (every other scenario) ⇒ no
+    /// storm, a single connection epoch. Must be < `duration_secs` so there is a
+    /// post-storm send window to prove resume continuity.
+    #[serde(default)]
+    reconnect_at_secs: Option<u64>,
+    /// Max reconnect stagger — OPN.md §7's 0–3 s thundering-herd jitter, spread
+    /// deterministically across connections (no rng). Only used with a storm.
+    #[serde(default = "default_reconnect_jitter")]
+    reconnect_jitter_secs: f64,
+    /// Non-vacuity gate (reconnect-storm): fail if the run reported 0 reconnects,
+    /// i.e. the storm never fired. Mirrors pg-restart's `assert_error_acks`.
+    #[serde(default)]
+    assert_reconnected: bool,
     /// CI gate: fail (exit 1) if ack RTT p99 exceeds this. `null` = no gate.
     #[serde(default)]
     assert_ack_p99_ms: Option<f64>,
@@ -74,6 +128,14 @@ struct Scenario {
 
 fn default_warmup() -> u64 {
     3
+}
+
+fn default_reconnect_jitter() -> f64 {
+    3.0
+}
+
+fn default_calls_per_sec() -> f64 {
+    1.0
 }
 
 #[tokio::main]
@@ -169,32 +231,87 @@ async fn run_scenario(path: &str) -> Result<ExitCode> {
     }
     validate(&scenario)?;
 
-    // Even connection count — connections are driven in pairs.
-    let conns = scenario.connections & !1;
-    if conns < scenario.connections {
-        eprintln!(
-            "loadgen: rounding {} connections down to {conns} (paired)",
-            scenario.connections
-        );
-    }
+    // Connection count. The group topology uses every connection (one creator +
+    // N-1 members); the paired topology rounds down to an even count.
+    let conns = if scenario.group {
+        scenario.connections
+    } else {
+        let even = scenario.connections & !1;
+        if even < scenario.connections {
+            eprintln!(
+                "loadgen: rounding {} connections down to {even} (paired)",
+                scenario.connections
+            );
+        }
+        even
+    };
 
     // ── seed: mint one session per connection over the real HTTP API ────────
+    // Bounded-concurrent (`buffered`) so the seed scales to soak/hot-channel
+    // connection counts. `buffered` yields in input order, so `sessions` stays
+    // index-aligned — the paired topology (conns 2i/2i+1) and the group creator
+    // (index 0) both depend on that; unordered `buffer_unordered` would silently
+    // shuffle pairs. `try_collect` short-circuits on the first mint error.
     let host = host_of(&scenario.target_http)?;
     eprintln!("loadgen: seeding {conns} sessions via {host} …");
-    let mut sessions = Vec::with_capacity(conns);
-    for i in 0..conns {
-        let m = http::mint(&host, &scenario.api_key, &format!("lg:{i}"))
-            .await
-            .with_context(|| format!("mint session {i}"))?;
-        sessions.push(m);
-    }
+    let sessions: Vec<http::Minted> = futures_util::stream::iter(0..conns)
+        .map(|i| {
+            let host = host.clone();
+            let key = scenario.api_key.clone();
+            async move {
+                http::mint(&host, &key, &format!("lg:{i}"))
+                    .await
+                    .with_context(|| format!("mint session {i}"))
+            }
+        })
+        .buffered(SEED_CONCURRENCY)
+        .try_collect()
+        .await?;
 
     // ── launch: paired connections, all aligned to one start instant ────────
     let epoch = Instant::now();
     let start_at = epoch + Duration::from_secs(scenario.warmup_secs);
     let send_deadline = start_at + Duration::from_secs(scenario.duration_secs);
     let read_deadline = send_deadline + Duration::from_secs(2); // drain grace
+
+    // ── call-churn: a wholly separate driver (calls, not messages) ──────────
+    // Every two sessions form a caller/callee pair; one shared /link consumer
+    // drains the tenant's voice-target events. The message machinery below is
+    // never reached in this mode, so it stays byte-identical for every other
+    // scenario.
+    if scenario.calls {
+        eprintln!(
+            "loadgen: {conns} conns ({} pairs), {:.1} calls/s/pair, {}s run …",
+            conns / 2,
+            scenario.calls_per_sec,
+            scenario.duration_secs
+        );
+        let results = callchurn::run_calls(
+            sessions,
+            scenario.target_ws.clone(),
+            scenario.api_key.clone(),
+            start_at,
+            send_deadline,
+            read_deadline,
+            scenario.calls_per_sec,
+        )
+        .await?;
+        let summary = Summary::merge(results);
+        summary.report(&scenario);
+        return Ok(summary.exit_code(&scenario));
+    }
+
     let period = Duration::from_secs_f64(conns as f64 / scenario.total_msgs_per_sec);
+
+    // reconnect-storm: one aligned storm instant for every connection, each
+    // reconnecting after a per-connection stagger spread evenly over
+    // `[0, reconnect_jitter_secs)` — the thundering herd without an rng.
+    let reconnect_at = scenario
+        .reconnect_at_secs
+        .map(|s| start_at + Duration::from_secs(s));
+    let reconnect_delay = |i: usize| {
+        Duration::from_secs_f64(scenario.reconnect_jitter_secs * (i as f64 / conns as f64))
+    };
 
     eprintln!(
         "loadgen: {conns} conns, {:.0} msg/s aggregate ({:.2}s per conn), {}s run …",
@@ -203,37 +320,73 @@ async fn run_scenario(path: &str) -> Result<ExitCode> {
         scenario.duration_secs
     );
 
+    let base = |token, char_id, pairing, rc_delay| ConnConfig {
+        ws_url: scenario.target_ws.clone(),
+        token,
+        char_id,
+        pairing,
+        epoch,
+        start_at,
+        send_deadline,
+        read_deadline,
+        period,
+        typing_every: scenario.typing_every,
+        read_every: scenario.read_every,
+        reconnect_at,
+        reconnect_delay: rc_delay,
+        record_acks,
+    };
+
     let mut handles = Vec::with_capacity(conns);
-    let mut sessions = sessions.into_iter();
-    while let (Some(left), Some(right)) = (sessions.next(), sessions.next()) {
-        let (tx, rx) = oneshot::channel();
-        let base = |token, char_id, pairing| ConnConfig {
-            ws_url: scenario.target_ws.clone(),
-            token,
-            char_id,
-            pairing,
-            epoch,
-            start_at,
-            send_deadline,
-            read_deadline,
-            period,
-            typing_every: scenario.typing_every,
-            read_every: scenario.read_every,
-            record_acks,
-        };
+    if scenario.group {
+        // hot-channel: one group of every connection. Conn 0 creates the channel
+        // and member_adds the rest; each member waits on its own `oneshot` for the
+        // channel id, then subs and sends. No storm here, so `reconnect_delay` is
+        // unused (reconnect_at is None).
+        let mut sessions = sessions.into_iter();
+        let creator = sessions
+            .next()
+            .ok_or_else(|| anyhow!("group needs >= 2 connections"))?;
+        let members: Vec<_> = sessions.collect();
+        let member_ids: Vec<Uuid> = members.iter().map(|m| m.char_id).collect();
+        let (txs, rxs): (Vec<_>, Vec<_>) = members.iter().map(|_| oneshot::channel()).unzip();
         handles.push(tokio::spawn(run_connection(base(
-            left.token,
-            left.char_id,
-            Pairing::Left {
-                peer_number: right.number.clone(),
-                tx,
-            },
+            creator.token,
+            creator.char_id,
+            Pairing::GroupCreator { member_ids, txs },
+            reconnect_delay(0),
         ))));
-        handles.push(tokio::spawn(run_connection(base(
-            right.token,
-            right.char_id,
-            Pairing::Right { rx },
-        ))));
+        for (i, (m, rx)) in members.into_iter().zip(rxs).enumerate() {
+            handles.push(tokio::spawn(run_connection(base(
+                m.token,
+                m.char_id,
+                Pairing::Right { rx },
+                reconnect_delay(i + 1),
+            ))));
+        }
+    } else {
+        // paired DMs: Left opens the thread to Right's number, both sub and send.
+        let mut sessions = sessions.into_iter();
+        let mut idx = 0usize;
+        while let (Some(left), Some(right)) = (sessions.next(), sessions.next()) {
+            let (tx, rx) = oneshot::channel();
+            handles.push(tokio::spawn(run_connection(base(
+                left.token,
+                left.char_id,
+                Pairing::Left {
+                    peer_number: right.number.clone(),
+                    tx,
+                },
+                reconnect_delay(idx),
+            ))));
+            handles.push(tokio::spawn(run_connection(base(
+                right.token,
+                right.char_id,
+                Pairing::Right { rx },
+                reconnect_delay(idx + 1),
+            ))));
+            idx += 2;
+        }
     }
 
     let results = futures_util::future::join_all(handles).await;
@@ -287,10 +440,33 @@ fn validate(s: &Scenario) -> Result<()> {
         bail!("no api key: set it in the scenario or OPN_LOADGEN_API_KEY");
     }
     if s.connections < 2 {
-        bail!("connections must be >= 2 (they run in pairs)");
+        bail!("connections must be >= 2 (a pair, or a group creator + >= 1 member)");
     }
     if s.total_msgs_per_sec <= 0.0 {
         bail!("total_msgs_per_sec must be > 0");
+    }
+    if s.group && s.reconnect_at_secs.is_some() {
+        bail!("group and reconnect_at_secs are mutually exclusive (no group storm scenario)");
+    }
+    if s.calls {
+        if s.group || s.reconnect_at_secs.is_some() {
+            bail!("calls is mutually exclusive with group and reconnect_at_secs");
+        }
+        if s.calls_per_sec <= 0.0 {
+            bail!("calls_per_sec must be > 0");
+        }
+    }
+    if let Some(r) = s.reconnect_at_secs {
+        if r >= s.duration_secs {
+            bail!(
+                "reconnect_at_secs ({r}) must be < duration_secs ({}) so there is \
+                 a post-storm window to prove resume continuity",
+                s.duration_secs
+            );
+        }
+    }
+    if s.reconnect_jitter_secs < 0.0 {
+        bail!("reconnect_jitter_secs must be >= 0");
     }
     Ok(())
 }
@@ -309,13 +485,16 @@ struct Summary {
     sends: u64,
     recvs: u64,
     seq_gaps: u64,
+    set_targets: u64,
     rate_limited: u64,
     error_acks: u64,
     durable_closes: u64,
     other_closes: u64,
     errors: u64,
+    reconnects: u64,
     ack: Percentiles,
     delivery: Percentiles,
+    resume: Percentiles,
     first_error: Option<String>,
 }
 
@@ -329,22 +508,26 @@ struct Percentiles {
 impl Summary {
     fn merge(results: Vec<Result<ConnStats, tokio::task::JoinError>>) -> Summary {
         let mut all = ConnStats::default();
-        let mut acks = Vec::new();
-        let mut dels = Vec::new();
         let mut connections = 0u64;
         for r in results {
             connections += 1;
             match r {
                 Ok(s) => {
-                    acks.extend_from_slice(&s.ack_rtts_us);
-                    dels.extend_from_slice(&s.deliveries_us);
+                    // Same fixed bounds on every histogram, so `add` never
+                    // errors (it only can if the source out-grew the dest max,
+                    // impossible here) — the merge is lossless.
+                    let _ = all.ack.add(&s.ack);
+                    let _ = all.delivery.add(&s.delivery);
+                    let _ = all.resume.add(&s.resume);
                     all.sends += s.sends;
                     all.recvs += s.recvs;
                     all.seq_gaps += s.seq_gaps;
+                    all.set_targets += s.set_targets;
                     all.rate_limited += s.rate_limited;
                     all.error_acks += s.error_acks;
                     all.durable_closes += s.durable_closes;
                     all.other_closes += s.other_closes;
+                    all.reconnects += s.reconnects;
                     all.errors += s.errors;
                     if all.error_detail.is_none() {
                         all.error_detail = s.error_detail;
@@ -363,13 +546,16 @@ impl Summary {
             sends: all.sends,
             recvs: all.recvs,
             seq_gaps: all.seq_gaps,
+            set_targets: all.set_targets,
             rate_limited: all.rate_limited,
             error_acks: all.error_acks,
             durable_closes: all.durable_closes,
             other_closes: all.other_closes,
             errors: all.errors,
-            ack: Percentiles::of(&mut acks),
-            delivery: Percentiles::of(&mut dels),
+            reconnects: all.reconnects,
+            ack: Percentiles::of(&all.ack),
+            delivery: Percentiles::of(&all.delivery),
+            resume: Percentiles::of(&all.resume),
             first_error: all.error_detail,
         }
     }
@@ -381,11 +567,13 @@ impl Summary {
             "sends": self.sends,
             "recvs": self.recvs,
             "seq_gaps": self.seq_gaps,
+            "set_targets": self.set_targets,
             "rate_limited": self.rate_limited,
             "error_acks": self.error_acks,
             "durable_closes": self.durable_closes,
             "other_closes": self.other_closes,
             "errors": self.errors,
+            "reconnects": self.reconnects,
             "ack_count": self.ack.count,
             "ack_p50_ms": round2(self.ack.p50_ms),
             "ack_p99_ms": round2(self.ack.p99_ms),
@@ -394,6 +582,10 @@ impl Summary {
             "delivery_p50_ms": round2(self.delivery.p50_ms),
             "delivery_p99_ms": round2(self.delivery.p99_ms),
             "delivery_max_ms": round2(self.delivery.max_ms),
+            "resume_count": self.resume.count,
+            "resume_p50_ms": round2(self.resume.p50_ms),
+            "resume_p99_ms": round2(self.resume.p99_ms),
+            "resume_max_ms": round2(self.resume.max_ms),
         });
         println!("{json}");
 
@@ -409,6 +601,17 @@ impl Summary {
             "delivery ms     p50 {:.2}  p99 {:.2}  max {:.2}  (n={})",
             self.delivery.p50_ms, self.delivery.p99_ms, self.delivery.max_ms, self.delivery.count
         );
+        if self.resume.count > 0 || self.reconnects > 0 {
+            eprintln!(
+                "resume ms       p50 {:.2}  p99 {:.2}  max {:.2}  (reconnects={})",
+                self.resume.p50_ms, self.resume.p99_ms, self.resume.max_ms, self.reconnects
+            );
+        }
+        if scenario.calls {
+            // In calls mode: sends = completed calls, recvs = /link frames, ack =
+            // call-setup latency, set_targets = link deliveries.
+            eprintln!("set_targets     {}", self.set_targets);
+        }
         eprintln!("rate_limited    {}", self.rate_limited);
         eprintln!("error_acks      {}", self.error_acks);
         eprintln!("seq_gaps        {}", self.seq_gaps);
@@ -464,6 +667,21 @@ impl Summary {
             );
             failed = true;
         }
+        if scenario.assert_reconnected && self.reconnects == 0 {
+            eprintln!(
+                "loadgen: FAIL — assert_reconnected set but 0 reconnects happened \
+                 (the storm never fired — the resume path was never exercised)"
+            );
+            failed = true;
+        }
+        if scenario.assert_calls && (self.sends == 0 || self.set_targets == 0) {
+            eprintln!(
+                "loadgen: FAIL — assert_calls set but {} calls completed and {} \
+                 set_targets seen (the FSM never ran or the /link relay never fired)",
+                self.sends, self.set_targets
+            );
+            failed = true;
+        }
         if failed {
             ExitCode::from(1)
         } else {
@@ -474,26 +692,17 @@ impl Summary {
 }
 
 impl Percentiles {
-    /// Exact nearest-rank percentiles over the samples (sorts in place).
-    fn of(samples_us: &mut [u64]) -> Percentiles {
-        samples_us.sort_unstable();
+    /// Percentiles from a fixed-memory histogram (µs buckets → ms). Empty
+    /// histogram → all zero (`value_at_quantile`/`max` return 0 at count 0),
+    /// preserving the old `Vec`-empty behavior.
+    fn of(h: &Histogram<u64>) -> Percentiles {
         Percentiles {
-            count: samples_us.len() as u64,
-            p50_ms: pct_ms(samples_us, 50.0),
-            p99_ms: pct_ms(samples_us, 99.0),
-            max_ms: samples_us.last().map(|u| *u as f64 / 1000.0).unwrap_or(0.0),
+            count: h.len(),
+            p50_ms: h.value_at_quantile(0.50) as f64 / 1000.0,
+            p99_ms: h.value_at_quantile(0.99) as f64 / 1000.0,
+            max_ms: h.max() as f64 / 1000.0,
         }
     }
-}
-
-/// Nearest-rank percentile of a sorted slice, in milliseconds.
-fn pct_ms(sorted_us: &[u64], q: f64) -> f64 {
-    if sorted_us.is_empty() {
-        return 0.0;
-    }
-    let n = sorted_us.len();
-    let rank = (q / 100.0 * (n as f64 - 1.0)).round() as usize;
-    sorted_us[rank.min(n - 1)] as f64 / 1000.0
 }
 
 fn round2(v: f64) -> f64 {
@@ -505,10 +714,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn percentiles_nearest_rank() {
-        // 1..=100 us -> p50 ~= 50 us, p99 ~= 99 us, max = 100 us (in ms).
-        let mut s: Vec<u64> = (1..=100).collect();
-        let p = Percentiles::of(&mut s);
+    fn percentiles_from_histogram() {
+        // 1..=100 us recorded -> p50 ~= 50 us, p99 ~= 99 us, max = 100 us (ms).
+        // All values < 1000 with 3 sig figs sit in their own bucket, so the
+        // quantiles are exact here (bucketing only rounds larger magnitudes).
+        let mut h = driver::new_hist();
+        for v in 1..=100u64 {
+            h.saturating_record(v);
+        }
+        let p = Percentiles::of(&h);
         assert_eq!(p.count, 100);
         assert!((p.p50_ms - 0.050).abs() < 0.002, "p50 {}", p.p50_ms);
         assert!((p.p99_ms - 0.099).abs() < 0.002, "p99 {}", p.p99_ms);
@@ -517,9 +731,10 @@ mod tests {
 
     #[test]
     fn percentiles_empty_is_zero() {
-        let p = Percentiles::of(&mut []);
+        let p = Percentiles::of(&driver::new_hist());
         assert_eq!(p.count, 0);
         assert_eq!(p.p99_ms, 0.0);
+        assert_eq!(p.max_ms, 0.0);
     }
 
     #[test]

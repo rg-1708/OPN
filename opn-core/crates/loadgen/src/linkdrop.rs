@@ -194,8 +194,9 @@ async fn await_set_targets(link: &mut Ws, call_id: Uuid) -> Result<bool> {
     }
 }
 
-/// Connect a `/ws` session and authenticate it.
-async fn connect_auth(ws_url: &str, token: &str) -> Result<Ws> {
+/// Connect a `/ws` session and authenticate it. Shared with the call-churn
+/// driver (`callchurn.rs`), which drives many of these party sockets.
+pub(crate) async fn connect_auth(ws_url: &str, token: &str) -> Result<Ws> {
     let mut ws = connect_async(ws_url)
         .await
         .with_context(|| format!("ws connect {ws_url}"))?
@@ -216,8 +217,10 @@ async fn connect_auth(ws_url: &str, token: &str) -> Result<Ws> {
 }
 
 /// Connect the tenant `/link` consumer: API-key `Authorization` header (§1),
-/// send the `LinkHello`, await the hello ack (`{reply_to:0, ok:true}`).
-async fn connect_link(ws_url: &str, api_key: &str) -> Result<Ws> {
+/// send the `LinkHello`, await the hello ack (`{reply_to:0, ok:true}`). Shared
+/// with the call-churn driver, whose one link consumer drains the tenant's
+/// `set_targets`/`clear` events under load.
+pub(crate) async fn connect_link(ws_url: &str, api_key: &str) -> Result<Ws> {
     let mut req = ws_url
         .into_client_request()
         .with_context(|| format!("build link request for {ws_url}"))?;
@@ -267,8 +270,11 @@ async fn await_hello_ack(link: &mut Ws) -> Result<()> {
         .context("timed out awaiting link hello ack")?
 }
 
-/// `calls.start { callee_number, video: false }` → the new `call_id`.
-async fn start_call(caller: &mut Ws, callee_number: &str) -> Result<Uuid> {
+/// `calls.start { callee_number, video: false }` → the new `call_id`. Shared
+/// with the call-churn driver. Frame id 2 is safe to reuse per socket because
+/// every caller drives its socket strictly sequentially (send → await ack →
+/// next), so there is never a second id-2 frame in flight.
+pub(crate) async fn start_call(caller: &mut Ws, callee_number: &str) -> Result<Uuid> {
     send(
         caller,
         2,
@@ -291,8 +297,9 @@ async fn start_call(caller: &mut Ws, callee_number: &str) -> Result<Uuid> {
 }
 
 /// `calls.accept { call_id }` from the callee — the transition that lands the
-/// session in `active` and emits `set_targets` on the link.
-async fn accept_call(callee: &mut Ws, call_id: Uuid) -> Result<()> {
+/// session in `active` and emits `set_targets` on the link. Shared with the
+/// call-churn driver.
+pub(crate) async fn accept_call(callee: &mut Ws, call_id: Uuid) -> Result<()> {
     send(callee, 2, Cmd::CallsAccept { call_id }).await?;
     let (ok, _) = await_ack(callee, 2).await?;
     if !ok {
@@ -303,7 +310,8 @@ async fn accept_call(callee: &mut Ws, call_id: Uuid) -> Result<()> {
 
 /// `ws://127.0.0.1:8080/ws` → `ws://127.0.0.1:8080/link` — the tenant link
 /// endpoint on the same Core. The harness always passes the `/ws` gateway URL.
-fn link_url(ws: &str) -> Result<String> {
+/// Shared with the call-churn driver.
+pub(crate) fn link_url(ws: &str) -> Result<String> {
     let base = ws
         .strip_suffix("/ws")
         .ok_or_else(|| anyhow!("ws url must end in /ws: {ws}"))?;
