@@ -23,25 +23,25 @@ secret store. Set all of these on the app before the first deploy:
 | `OPN_TURN_USER` / `OPN_TURN_PASSWORD` | coturn long-term creds | must match `OPN_ICE_SERVERS` |
 | `OPN_RUST_LOG` | Core log filter | optional, defaults to `info` |
 
-## 1. Traefik dynamic config — min TLS 1.2 (one-time, operator)
+## 1. Traefik TLS notes (Coolify host)
 
-TLS versions cannot be set by a per-router label; the router references a named
-options block. Create it once in Traefik's dynamic-config dir (Coolify proxy
-dynamic dir, e.g. `/data/coolify/proxy/dynamic/tls-options.yaml`):
+**Do NOT hand-create a `tls-options.yaml` in `/data/coolify/proxy/dynamic/`.**
+Verified on the first beta deploy: Traefik never loads operator-dropped files
+there (not on watch, not on touch, not on proxy restart), and a router whose
+`tls.options` reference cannot resolve does not fall back to defaults — it
+fails to build entirely and every TLS handshake is reset. The
+`tls.options=default@file` label was removed from the compose for this reason;
+the router serves on Traefik's default TLS config. Re-adding a min-TLS-1.2
+floor must go through Coolify's own proxy configuration (open item, see
+[beta-release-findings.md](../beta-release-findings.md) §3).
 
-```yaml
-tls:
-  options:
-    default:
-      minVersion: VersionTLS12
-```
-
-The compose router already points at `default@file`
-([docker-compose.prod.yml](../../opn-core/docker-compose.prod.yml), `tls.options`
-label) and adds the HSTS middleware (`stsSeconds=31536000`, includeSubdomains,
-forceSTSHeader). Confirm the certresolver name (`letsencrypt` in the label)
-matches the resolver Coolify's Traefik defines; align if the host uses a
-different name.
+The compose adds the HSTS middleware (`stsSeconds=31536000`, includeSubdomains,
+forceSTSHeader) via plain docker-provider labels — those load fine. The
+certresolver name (`letsencrypt`) and entrypoint name (`https`, Coolify's name
+for :443 — stock `websecure` does not exist on a Coolify host) are confirmed
+against the proxy's args; re-verify with
+`docker inspect coolify-proxy --format '{{range .Args}}{{println .}}{{end}}'`
+if the host changes.
 
 ## 2. First deploy (fresh Postgres volume)
 
