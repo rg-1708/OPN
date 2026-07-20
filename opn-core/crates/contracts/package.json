@@ -1,0 +1,17 @@
+{
+  "name": "@opn/contracts",
+  "version": "0.1.0",
+  "description": "TypeScript type bindings for the OPN-CORE wire protocol (generated from the Rust `contracts` crate).",
+  "license": "UNLICENSED",
+  "types": "bindings/index.ts",
+  "files": [
+    "bindings"
+  ],
+  "publishConfig": {
+    "access": "restricted"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OPN/opn-core"
+  }
+}

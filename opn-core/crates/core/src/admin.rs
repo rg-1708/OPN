@@ -6,6 +6,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
 use rand::RngCore;
 use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::infra::auth::api_key_hash;
@@ -13,12 +14,14 @@ use crate::infra::ids::new_id;
 
 const USAGE: &str = "usage: admin create-tenant --name <tenant-name> \
                      (--world <uuid> | --new-world <world-name>)";
+const UNFREEZE_USAGE: &str = "usage: admin unfreeze --world <uuid> --account <uuid>";
 
-/// Entry point for `argv[1] == "admin"`. Hand-parsed (no clap) — one command.
+/// Entry point for `argv[1] == "admin"`. Hand-parsed (no clap).
 pub async fn run(args: &[String]) -> Result<()> {
     match args.first().map(String::as_str) {
         Some("create-tenant") => create_tenant(&args[1..]).await,
-        _ => bail!("{USAGE}"),
+        Some("unfreeze") => unfreeze(&args[1..]).await,
+        _ => bail!("{USAGE}\n{UNFREEZE_USAGE}"),
     }
 }
 
@@ -112,4 +115,65 @@ async fn create_tenant(args: &[String]) -> Result<()> {
     println!("api key:   {key}");
     println!("^ shown once — only its sha256 hash is stored, save it now.");
     Ok(())
+}
+
+/// `admin unfreeze --world <uuid> --account <uuid>` (roadmap Sprint 7 item 7 /
+/// Sprint 11 item 5). The deliberate human gate: nightly reconciliation freezes
+/// a drifted account (`accounts.frozen_at`, rejecting outgoing ops); after an
+/// operator confirms the true balance (see `docs/runbooks/frozen-account.md`),
+/// this clears the freeze. Runs as the owner role (bypasses RLS) so the world is
+/// scoped explicitly, and only ever thaws a *currently-frozen* account.
+async fn unfreeze(args: &[String]) -> Result<()> {
+    let mut world: Option<String> = None;
+    let mut account: Option<String> = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        let val = args.get(i + 1);
+        match args[i].as_str() {
+            "--world" => world = Some(val.ok_or_else(|| anyhow!("{UNFREEZE_USAGE}"))?.clone()),
+            "--account" => account = Some(val.ok_or_else(|| anyhow!("{UNFREEZE_USAGE}"))?.clone()),
+            other => bail!("unknown argument {other}\n{UNFREEZE_USAGE}"),
+        }
+        i += 2;
+    }
+
+    let world_id = Uuid::parse_str(&world.ok_or_else(|| anyhow!("{UNFREEZE_USAGE}"))?)
+        .context("--world is not a valid uuid")?;
+    let account_id = Uuid::parse_str(&account.ok_or_else(|| anyhow!("{UNFREEZE_USAGE}"))?)
+        .context("--account is not a valid uuid")?;
+
+    // Owner role: opn_app cannot UPDATE another world's accounts under RLS, and
+    // this is an operator break-glass, not a request path. Same role as migrations.
+    let url = std::env::var("OPN_MIGRATE_DATABASE_URL")
+        .context("missing required env var OPN_MIGRATE_DATABASE_URL")?;
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .context("connect owner pool")?;
+
+    if unfreeze_account(&pool, world_id, account_id).await? == 0 {
+        bail!("no frozen account {account_id} in world {world_id} (already thawed or absent)");
+    }
+    println!("unfroze account {account_id} in world {world_id}");
+    Ok(())
+}
+
+/// Clear `frozen_at` on a currently-frozen account, returning rows affected
+/// (0 = not frozen or not found). The DB half of `admin unfreeze`, split out so
+/// `#[sqlx::test]` can drive it against a seeded account without the CLI. Owner
+/// role assumed (RLS-bypassing), so the world is matched explicitly, not via
+/// `app.world_id`.
+pub async fn unfreeze_account(pool: &PgPool, world_id: Uuid, account_id: Uuid) -> Result<u64> {
+    let res = sqlx::query(
+        "UPDATE accounts SET frozen_at = NULL \
+         WHERE world_id = $1 AND id = $2 AND frozen_at IS NOT NULL",
+    )
+    .bind(world_id)
+    .bind(account_id)
+    .execute(pool)
+    .await
+    .context("unfreeze account")?;
+    Ok(res.rows_affected())
 }

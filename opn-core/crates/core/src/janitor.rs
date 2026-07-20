@@ -10,7 +10,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use anyhow::Result;
-use metrics::counter;
+use metrics::{counter, gauge};
 use sqlx::PgPool;
 use time::OffsetDateTime;
 use tokio::time::{interval, MissedTickBehavior};
@@ -25,6 +25,12 @@ pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
         tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
             tick.tick().await;
+            // Sample the pool-usage gauge each tick. `observe.rs` only registers
+            // `opn_pg_pool_in_use` at 0; without this the PgPoolExhaustion alert
+            // (deploy/prometheus/alerts.yml) can never fire. Coarse at 30 s, which
+            // matches the alert's "sustained 1 min" window. The always-running
+            // janitor loop is the one place with `&state` and a steady tick.
+            gauge!("opn_pg_pool_in_use").set(f64::from(pool_in_use(&state.pg)));
             run_task("expired_sessions", expired_sessions(&state.pg)).await;
             run_task("retired_numbers_sweep", retired_numbers_sweep(&state.pg)).await;
             run_task("message_partition", ensure_next_partition(&state.pg)).await;
@@ -39,6 +45,13 @@ pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
             run_task("ratelimit_sweep", async { Ok(state.limits.sweep_idle()) }).await;
         }
     })
+}
+
+/// In-use pool connections = established minus idle. The value the janitor
+/// samples into `opn_pg_pool_in_use` each tick (the PgPoolExhaustion alert keys
+/// on it). Extracted so it can be asserted without spinning the 30 s loop.
+pub(crate) fn pool_in_use(pool: &PgPool) -> u32 {
+    pool.size().saturating_sub(pool.num_idle() as u32)
 }
 
 /// Runs one task; a failure logs and counts but never escapes to kill the loop.
@@ -259,4 +272,26 @@ pub async fn ensure_next_partition(pool: &PgPool) -> Result<u64> {
         .execute(pool)
         .await?;
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pool_in_use;
+    use sqlx::PgPool;
+
+    /// `pool_in_use` reflects checked-out connections: holding two acquired
+    /// guards raises it at least two above the idle baseline. This is the value
+    /// the janitor samples into `opn_pg_pool_in_use`, so the PgPoolExhaustion
+    /// alert has a live gauge to fire on. Proven deterministically — a 30 s
+    /// instantaneous sample can't reliably catch sub-ms query load.
+    #[sqlx::test]
+    async fn pool_in_use_tracks_checked_out(pool: PgPool) {
+        let base = pool_in_use(&pool);
+        let _c1 = pool.acquire().await.expect("acquire c1");
+        let _c2 = pool.acquire().await.expect("acquire c2");
+        assert!(
+            pool_in_use(&pool) >= base + 2,
+            "two held connections raise in_use above baseline {base}",
+        );
+    }
 }

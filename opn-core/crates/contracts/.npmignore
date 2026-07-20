@@ -1,0 +1,9 @@
+# The published package is types-only: the generated `bindings/` dir plus the
+# package manifest. `files: ["bindings"]` in package.json already whitelists;
+# this excludes the Rust crate belt-and-suspenders in case that field is dropped.
+src/
+bin/
+target/
+Cargo.toml
+Cargo.lock
+*.rs

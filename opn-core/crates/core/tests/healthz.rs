@@ -48,3 +48,27 @@ async fn healthz_503_when_postgres_unreachable() {
     let state = state_with("postgres://nobody:nothing@127.0.0.1:1/void").await;
     assert_eq!(get_healthz(state).await, StatusCode::SERVICE_UNAVAILABLE);
 }
+
+/// The body reports the running build's contracts version (Sprint 11 item 6) so
+/// a deploy/triage can confirm which build is live from `/healthz` alone.
+#[tokio::test]
+async fn healthz_body_reports_contracts_version() {
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL (dev stack up?)");
+    let state = state_with(&url).await;
+    let res = app_router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/healthz")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(res.into_body(), 64 * 1024)
+        .await
+        .expect("body bytes");
+    let v: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+    assert_eq!(v["status"], "ok");
+    assert_eq!(v["contracts_version"], contracts::CONTRACTS_VERSION);
+}

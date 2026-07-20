@@ -3,7 +3,7 @@ use std::time::Duration;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
-use axum::Router;
+use axum::{Json, Router};
 use metrics_exporter_prometheus::PrometheusHandle;
 
 use crate::state::AppState;
@@ -44,8 +44,11 @@ pub fn metrics_router(handle: PrometheusHandle) -> Router {
 }
 
 /// Live PG `SELECT 1` + Redis `PING`, 1 s timeout each; 503 on any failure
-/// (OPN-CORE.md §14). Coolify gates rollout on this.
-async fn healthz(State(state): State<AppState>) -> (StatusCode, &'static str) {
+/// (OPN-CORE.md §14). Coolify gates rollout on this. The JSON body reports the
+/// running build's `contracts_version` + `core_version` (roadmap Sprint 11
+/// item 6) so a deploy/incident-triage can confirm which build is live without
+/// shelling in — status flips to "unavailable" on the 503 path, versions stay.
+async fn healthz(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
     let pg = tokio::time::timeout(
         Duration::from_secs(1),
         sqlx::query("SELECT 1").execute(&state.pg),
@@ -55,15 +58,22 @@ async fn healthz(State(state): State<AppState>) -> (StatusCode, &'static str) {
         redis::cmd("PING").query_async::<String>(&mut redis).await
     });
     let (pg, ping) = tokio::join!(pg, ping);
+    let body = |status: &str| {
+        Json(serde_json::json!({
+            "status": status,
+            "contracts_version": contracts::CONTRACTS_VERSION,
+            "core_version": env!("CARGO_PKG_VERSION"),
+        }))
+    };
     match (pg, ping) {
-        (Ok(Ok(_)), Ok(Ok(_))) => (StatusCode::OK, "ok"),
+        (Ok(Ok(_)), Ok(Ok(_))) => (StatusCode::OK, body("ok")),
         (pg, ping) => {
             tracing::warn!(
                 pg_ok = matches!(pg, Ok(Ok(_))),
                 redis_ok = matches!(ping, Ok(Ok(_))),
                 "healthz failing"
             );
-            (StatusCode::SERVICE_UNAVAILABLE, "unavailable")
+            (StatusCode::SERVICE_UNAVAILABLE, body("unavailable"))
         }
     }
 }

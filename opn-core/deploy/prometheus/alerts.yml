@@ -1,0 +1,83 @@
+groups:
+  - name: opn-core
+    rules:
+      # --- §14 mandated alerts on Core's own metrics ---
+
+      - alert: HighCommandLatencyP99
+        expr: histogram_quantile(0.99, sum(rate(opn_command_seconds_bucket[5m])) by (le)) > 0.025
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "Command p99 latency above 25ms design line (5m)"
+          description: >
+            Command p99 has exceeded the §14 alert threshold of 25ms for 5 minutes.
+            Check opn_command_seconds by cmd to find the slow command, then follow
+            docs/runbooks/incident-triage.md (latency section). 25ms is the fixed
+            design line, not the tuned smoke number.
+
+      - alert: DurableQueueCloses
+        expr: increase(opn_sendq_drops_total{class="durable_close"}[5m]) > 0
+        for: 0m
+        labels:
+          severity: page
+        annotations:
+          summary: "Durable slow-consumer disconnect(s) occurred"
+          description: >
+            One or more durable subscribers were disconnected as slow consumers
+            (sendq backpressure). Data delivery to those clients was interrupted.
+            Follow docs/runbooks/incident-triage.md (slow-consumer section) and
+            correlate with opn_sendq_depth.
+
+      - alert: PgPoolExhaustion
+        expr: opn_pg_pool_in_use >= 20
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "Postgres pool saturated (in_use >= max 20)"
+          description: >
+            All 20 pooled Postgres connections are in use for 1 minute; new work
+            will block on checkout. Look for long-running queries or a stuck
+            janitor task. Follow docs/runbooks/incident-triage.md (pool section).
+
+      - alert: JanitorFailures
+        expr: increase(opn_janitor_runs_total{outcome="err"}[15m]) > 0
+        for: 0m
+        labels:
+          severity: page
+        annotations:
+          summary: "A janitor task returned an error"
+          description: >
+            A background janitor run failed (outcome=err) in the last 15 minutes.
+            Check the {task} label. Janitor failures can leave ledger drift or
+            unreverted media; follow docs/runbooks/incident-triage.md, and if
+            ledger drift (opn_ledger_drift_total) is involved, docs/runbooks/frozen-account.md.
+
+      # --- ops-level alerts (depend on external exporters Core does NOT ship) ---
+
+      - alert: HealthzDown
+        expr: probe_success{job="opn-healthz"} == 0
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "Core /healthz probe failing"
+          description: >
+            The /healthz endpoint has failed its probe for 1 minute; Core may be
+            down or unresponsive. Follow docs/runbooks/incident-triage.md.
+            Requires blackbox_exporter probing Core's /healthz (job=opn-healthz) —
+            this probe is NOT shipped by Core.
+
+      - alert: DiskAlmostFull
+        expr: (1 - node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) > 0.8
+        for: 10m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Root filesystem over 80% full"
+          description: >
+            Root filesystem usage has been above 80% for 10 minutes. Free space
+            (logs, media, Postgres WAL) before it fills. Follow
+            docs/runbooks/incident-triage.md (disk section). Requires node_exporter
+            (node_filesystem_* metrics) — NOT shipped by Core.

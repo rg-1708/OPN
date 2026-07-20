@@ -1,0 +1,90 @@
+name: Publish contracts
+
+# Publishes @opn/contracts (the generated TS wire-protocol types) to npm on a
+# release tag (roadmap Sprint 11 item 6). The package version is single-sourced
+# from the `contracts` crate's Cargo.toml — the same value the server reports as
+# CONTRACTS_VERSION — so the published types can never drift from the running
+# contract. The barrel `bindings/index.ts` is generated at publish time only,
+# AFTER the drift check, so it never pollutes the committed bindings gate.
+#
+# Operator prerequisite: the `NPM_TOKEN` repo secret (an npm automation token
+# with publish rights to the @opn scope). Absent → the publish step fails; every
+# step before it (regenerate, drift, version-match) still runs and validates.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: opn-core
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: opn-core
+
+      # Regenerate from the crate so published types match the committed crate.
+      - name: Regenerate bindings
+        run: cargo run -p contracts --bin export_ts
+
+      # Defensive drift gate inside the publish job: a tag on stale bindings must
+      # not publish. Mirrors ci.yml's contracts-drift job.
+      - name: Enforce contracts drift gate
+        run: git diff --exit-code -- crates/contracts/bindings
+
+      # Single-source the version from the crate and require the tag to agree.
+      # A tag that disagrees with the crate version is an operator mistake, not
+      # something to silently publish under the wrong number.
+      - name: Sync version from crate and verify tag
+        if: github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          crate_ver=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/contracts/Cargo.toml | head -n1)
+          tag_ver="${GITHUB_REF_NAME#v}"
+          echo "crate=$crate_ver tag=$tag_ver"
+          if [ "$crate_ver" != "$tag_ver" ]; then
+            echo "tag $GITHUB_REF_NAME does not match contracts crate version $crate_ver" >&2
+            exit 1
+          fi
+          ( cd crates/contracts && npm version --no-git-tag-version --allow-same-version "$crate_ver" )
+
+      # On manual dispatch (no tag), still sync the manifest to the crate version
+      # so a hand-run publish uses the right number.
+      - name: Sync version from crate (manual dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          set -euo pipefail
+          crate_ver=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/contracts/Cargo.toml | head -n1)
+          ( cd crates/contracts && npm version --no-git-tag-version --allow-same-version "$crate_ver" )
+
+      # Generate the barrel AFTER the drift check — publish-time only, never
+      # committed. Re-exports every generated type so consumers can
+      # `import { Cmd } from '@opn/contracts'`.
+      - name: Generate barrel index
+        run: |
+          set -euo pipefail
+          cd crates/contracts/bindings
+          : > index.ts
+          for f in *.ts; do
+            [ "$f" = "index.ts" ] && continue
+            echo "export * from './${f%.ts}';" >> index.ts
+          done
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Publish to npm
+        working-directory: opn-core/crates/contracts
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish

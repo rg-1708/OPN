@@ -1,0 +1,13 @@
+# Build context is opn-core/. Keep the release image build fast and
+# reproducible: never ship build output, local perf artifacts, or logs into the
+# builder. (The repo .git lives above this dir, so it is already out of context.)
+target/
+perf/results/
+**/*.log
+fuzz/target/
+fuzz/corpus/
+node_modules/
+# Deploy/ops scripts (backup, prometheus, initdb) are mounted at runtime via
+# compose or run on the host — never COPYed into the image. Keeping them out of
+# the context means editing a backup script doesn't bust the cargo build cache.
+deploy/

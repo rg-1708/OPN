@@ -21,3 +21,10 @@ pub use types::{
     MessagePreview, NotifyClass, PostItem, ReceiptKind, ResolveResult, SessionMintResponse,
     TransferItem, UploadTarget, UploadTicket, VoiceAction,
 };
+
+/// This crate's version, embedded at compile time from `Cargo.toml`
+/// (`CARGO_PKG_VERSION`) — the single source of truth for the wire-contract
+/// version. Surfaced at runtime in the `/healthz` body and the `/link` hello
+/// ack, and the value the `@opn/contracts` npm publish tags (roadmap Sprint 11
+/// item 6). Additive-only within a major (OPN.md §10.1).
+pub const CONTRACTS_VERSION: &str = env!("CARGO_PKG_VERSION");

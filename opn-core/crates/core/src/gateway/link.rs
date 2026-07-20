@@ -321,10 +321,13 @@ async fn link_write_loop(
 /// (§5), `reply_to: 0` since the hello has no frame id. Lets the resource (and
 /// tests) confirm the link is live before the first voice event.
 fn hello_ack() -> Arc<str> {
+    // Report Core's own contracts version back to the resource (roadmap Sprint 11
+    // item 6). The resource logs its resource-side pair; the seam is here for a
+    // future version negotiation without a protocol change (mirrors is_broken_combo).
     let msg = ServerMsg::Ack {
         reply_to: 0,
         ok: true,
-        payload: None,
+        payload: Some(serde_json::json!({ "contracts_version": contracts::CONTRACTS_VERSION })),
         err: None,
     };
     match serde_json::to_string(&msg) {
@@ -360,6 +363,19 @@ mod tests {
             action: VoiceAction::Clear,
             characters: Vec::new(),
         }
+    }
+
+    /// The hello ack reports Core's embedded contracts version (Sprint 11 item 6):
+    /// an `ok` ack whose payload carries the exact `CONTRACTS_VERSION` constant.
+    #[test]
+    fn hello_ack_carries_contracts_version() {
+        let v: serde_json::Value = serde_json::from_str(&hello_ack()).expect("ack is json");
+        assert_eq!(v["reply_to"], 0);
+        assert_eq!(v["ok"], true);
+        assert_eq!(
+            v["payload"]["contracts_version"],
+            contracts::CONTRACTS_VERSION
+        );
     }
 
     #[tokio::test]

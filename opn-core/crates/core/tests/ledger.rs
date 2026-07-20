@@ -227,6 +227,36 @@ async fn transfer_happy_insufficient_frozen_missing(admin: PgPool) {
     assert_eq!(code_of(r), ErrCode::Conflict, "frozen source can't send");
 }
 
+/// `admin unfreeze` closes the reconciliation loop (Sprint 7 item 7 / Sprint 11
+/// item 5): a frozen account rejects outgoing ops, the CLI's owner-role
+/// `unfreeze_account` thaws exactly it, then it can send again — and a second
+/// thaw is a no-op (0 rows). This is the recovery path the frozen-account runbook
+/// documents; the roadmap named it a Sprint 7 exit criterion but the CLI never
+/// shipped until now.
+#[sqlx::test(migrator = "opn_core::MIGRATOR")]
+async fn admin_unfreeze_clears_freeze(admin: PgPool) {
+    let fx = fixture(&admin).await;
+
+    freeze(&fx.state, fx.world, fx.acct_a).await;
+    let r = ledger::transfer(&fx.state, &fx.a, fx.acct_a, fx.acct_b, 100, Uuid::now_v7()).await;
+    assert_eq!(code_of(r), ErrCode::Conflict, "frozen source can't send");
+
+    // The owner-role thaw the CLI runs (admin pool = migrate role, RLS-bypassing).
+    let n = opn_core::admin::unfreeze_account(&admin, fx.world, fx.acct_a)
+        .await
+        .expect("unfreeze");
+    assert_eq!(n, 1, "exactly the frozen account thawed");
+
+    ledger::transfer(&fx.state, &fx.a, fx.acct_a, fx.acct_b, 100, Uuid::now_v7())
+        .await
+        .expect("thawed account can send again");
+
+    let n2 = opn_core::admin::unfreeze_account(&admin, fx.world, fx.acct_a)
+        .await
+        .expect("unfreeze again");
+    assert_eq!(n2, 0, "already-thawed account is a no-op");
+}
+
 /// Ownership (only the owner may debit) + idempotency (a `client_uuid` retry
 /// returns the original ack and debits exactly once) (§10.5).
 #[sqlx::test(migrator = "opn_core::MIGRATOR")]
