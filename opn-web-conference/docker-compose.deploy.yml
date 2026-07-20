@@ -1,0 +1,62 @@
+# Production stack for the OPN web conference template — Coolify + Traefik.
+#
+# One service: the SPA + /join + /ws reverse proxy, all in one Node process
+# (deploy/server.mjs). Coolify runs Traefik as ingress; the traefik.* labels
+# wire TLS, HSTS, and sticky WebSockets, mirroring opn-core/docker-compose.prod.yml.
+#
+# Prereqs on Core (once):
+#   - a tenant + API key:  opn-core admin create-tenant --name web --new-world web
+#   - allowlist this app's origin (no admin command for this — SQL, owner role):
+#       UPDATE tenants SET allowed_origins =
+#         array_append(allowed_origins, 'https://opn-web.mainframenetwork.com')
+#       WHERE id = '<tenant-id>';
+#
+# Coolify build pack: Docker Compose. Set OPN_CORE_URL + OPN_TENANT_API_KEY as
+# secrets. Leave the per-service Domains field empty — routing is the labels.
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      # Core's PUBLIC base URL — used both to mint (/join) and as the /ws proxy
+      # target. https here means the /ws upstream is wss.
+      OPN_CORE_URL: ${OPN_CORE_URL}
+      # Tenant API key. SERVER-SIDE ONLY — never bundled into the browser.
+      OPN_TENANT_API_KEY: ${OPN_TENANT_API_KEY}
+      PORT: "8080"
+    healthcheck:
+      # Node 22 has global fetch; gate rollout on the app server being up.
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    labels:
+      - "traefik.enable=true"
+      # Coolify does NOT expand ${VAR} inside traefik.* labels — the host is
+      # hardcoded (keep in sync with the DNS record + Core's allowed_origins).
+      - "traefik.http.routers.opn-web.rule=Host(`opn-web.mainframenetwork.com`)"
+      # Coolify's Traefik names the :443 entrypoint `https` (not `websecure`).
+      - "traefik.http.routers.opn-web.entrypoints=https"
+      - "traefik.http.routers.opn-web.tls=true"
+      - "traefik.http.routers.opn-web.tls.certresolver=letsencrypt"
+      # ponytail: TLS floor deferred (Traefik default), matching Core — raise via
+      # Coolify's proxy config, not a hand-dropped dynamic file (it won't load).
+      - "traefik.http.routers.opn-web.middlewares=opn-web-hsts@docker"
+      - "traefik.http.middlewares.opn-web-hsts.headers.stsSeconds=31536000"
+      - "traefik.http.middlewares.opn-web-hsts.headers.stsIncludeSubdomains=true"
+      - "traefik.http.middlewares.opn-web-hsts.headers.forceSTSHeader=true"
+      - "traefik.http.services.opn-web.loadbalancer.server.port=8080"
+      # Sticky cookie so a browser's HTTP + WS land on the same replica.
+      - "traefik.http.services.opn-web.loadbalancer.sticky.cookie=true"
+      - "traefik.http.services.opn-web.loadbalancer.sticky.cookie.name=opn_web_affinity"
+      - "traefik.http.services.opn-web.loadbalancer.sticky.cookie.secure=true"

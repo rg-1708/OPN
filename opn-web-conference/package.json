@@ -12,6 +12,8 @@
   "scripts": {
     "dev": "npm run dev --workspace app",
     "dev:auth": "node --env-file-if-exists=.env dev-auth/server.mjs",
+    "build": "npm run build --workspace app",
+    "start": "node --env-file-if-exists=.env deploy/server.mjs",
     "typecheck": "tsc -p packages/client && tsc -p app",
     "test": "node --test 'packages/client/test/**/*.test.ts'",
     "smoke": "node --env-file-if-exists=.env scripts/smoke.mjs"
