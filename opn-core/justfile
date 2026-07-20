@@ -85,7 +85,8 @@ perf scenario="design":
     export DATABASE_URL=postgres://opn_app:opn@localhost:5432/opn
     export OPN_MIGRATE_DATABASE_URL=postgres://opn_migrate:opn@localhost:5432/opn
     export REDIS_URL=redis://localhost:6379
-    export S3_ENDPOINT=http://localhost:9000
+    # 19000: MinIO's remapped host port (see docker-compose.perf.yml).
+    export S3_ENDPOINT=http://localhost:19000
     export S3_BUCKET=opn
     export S3_KEY=opn
     export S3_SECRET=opnsecret

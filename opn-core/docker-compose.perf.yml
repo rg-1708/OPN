@@ -44,9 +44,12 @@ services:
     environment:
       MINIO_ROOT_USER: opn
       MINIO_ROOT_PASSWORD: opnsecret
+    # Host ports 19000/19001, not 9000/9001: the perf host runs Coolify, which
+    # binds 9000 on localhost. Container ports stay 9000/9001 (createbucket and
+    # the healthcheck talk to minio:9000 on the compose network).
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "19000:9000"
+      - "19001:9001"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 5s
