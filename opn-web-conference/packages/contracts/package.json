@@ -1,0 +1,10 @@
+{
+  "name": "@opn/contracts",
+  "version": "0.1.0",
+  "description": "OPN wire-protocol types (vendored TS bindings). Stand-in for the published npm package until it ships — see README.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "types": "./src/index.ts"
+}

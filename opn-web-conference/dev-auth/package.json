@@ -1,0 +1,10 @@
+{
+  "name": "@opn/dev-auth",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs"
+  }
+}

@@ -1,0 +1,35 @@
+# CI for opn-web-conference.
+# The `test` job runs the pure, no-Core checks (typecheck + client unit tests).
+# The `smoke` job is a GATED placeholder: the real-Core smoke lands in Sprint W3.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # No committed lockfile yet, so `npm install` rather than `npm ci`.
+      - run: npm install
+      - run: npm run typecheck
+      - run: npm test
+
+  # Gated / optional: this needs a running Core, which CI does not stand up yet.
+  # Runs the unit tests as a placeholder so the workflow stays valid and green.
+  smoke:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm install
+      # TODO(W3): run the real-Core smoke — start the opn-core dev stack, then `npm run smoke`.
+      - run: npm test
