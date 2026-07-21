@@ -46,8 +46,15 @@ pub async fn create(
     _label: Option<String>,
     _max_participants: Option<i64>,
 ) -> Result<serde_json::Value, Fail> {
-    livekit(state)?;
-    let snap = store::group_create(&state.pg, who.world_id, who.character_id, who.device_id).await?;
+    let lk = livekit(state)?;
+    let snap = store::group_create(
+        &state.pg,
+        who.world_id,
+        who.character_id,
+        who.device_id,
+        lk.max_rooms,
+    )
+    .await?;
     let call_id = snap.call_id;
     publish_snapshot(state, who.world_id, &snap).await;
     Ok(json!({ "call_id": call_id }))
@@ -125,6 +132,19 @@ pub fn join_admits(session: CallSessionState, others_joined: i64, cap: i64) -> R
         return Err(ErrCode::Conflict);
     }
     if others_joined >= cap {
+        return Err(ErrCode::Conflict);
+    }
+    Ok(())
+}
+
+/// Per-tenant room-cap admission (G3): a world holds at most `cap` concurrent
+/// active group rooms — an anti-abuse ceiling so one tenant cannot spin up
+/// unbounded SFU rooms. At/over the cap, `calls.group.create` answers `Conflict`
+/// (end a room to free a slot), deliberately not `RateLimited`: no timed backoff
+/// frees a slot, so the retry-after semantics would lie. Pure so it is testable
+/// without Postgres.
+pub fn rooms_admit(active_rooms: i64, cap: i64) -> Result<(), ErrCode> {
+    if active_rooms >= cap {
         return Err(ErrCode::Conflict);
     }
     Ok(())
@@ -283,6 +303,15 @@ mod tests {
             join_admits(CallSessionState::Ended, 0, 32),
             Err(ErrCode::Conflict)
         );
+    }
+
+    #[test]
+    fn rooms_admit_enforces_tenant_cap() {
+        assert!(rooms_admit(0, 50).is_ok());
+        assert!(rooms_admit(49, 50).is_ok());
+        // At and past the cap → conflict (end a room to free a slot).
+        assert_eq!(rooms_admit(50, 50), Err(ErrCode::Conflict));
+        assert_eq!(rooms_admit(51, 50), Err(ErrCode::Conflict));
     }
 
     #[test]

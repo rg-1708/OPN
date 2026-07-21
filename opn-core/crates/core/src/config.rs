@@ -40,6 +40,10 @@ pub struct LivekitConfig {
     /// member cap). A `calls.group.create` `max_participants` above this is
     /// clamped, not rejected.
     pub max_participants_default: i64,
+    /// Anti-abuse ceiling on concurrent active group rooms per tenant (world).
+    /// `calls.group.create` past this answers `conflict` — end a room to free a
+    /// slot. Default 50; tune down on small hosts (env `LIVEKIT_MAX_ROOMS`).
+    pub max_rooms: i64,
 }
 
 #[derive(Debug)]
@@ -170,6 +174,7 @@ impl Config {
                 api_secret,
                 empty_room_reap_secs: opt("LIVEKIT_EMPTY_ROOM_REAP_SECS", 300)?,
                 max_participants_default: opt("LIVEKIT_MAX_PARTICIPANTS", 32)?,
+                max_rooms: opt("LIVEKIT_MAX_ROOMS", 50)?,
             }),
             _ => None,
         };

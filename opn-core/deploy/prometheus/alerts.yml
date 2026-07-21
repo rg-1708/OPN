@@ -54,6 +54,21 @@ groups:
             unreverted media; follow docs/runbooks/incident-triage.md, and if
             ledger drift (opn_ledger_drift_total) is involved, docs/runbooks/frozen-account.md.
 
+      - alert: LivekitWebhookRejected
+        expr: increase(opn_livekit_webhook_total{outcome="rejected"}[10m]) > 0
+        for: 0m
+        labels:
+          severity: warn
+        annotations:
+          summary: "LiveKit webhook signature verification failed"
+          description: >
+            One or more LiveKit webhooks were rejected on signature / body-hash
+            verification (outcome=rejected) in the last 10 minutes. Either the
+            shared LIVEKIT_API_SECRET drifted between Core and the SFU (group
+            truth-sync is now silently stale), or an unauthenticated caller is
+            probing the public webhook endpoint. Data plane and 1:1 calls are
+            unaffected. Follow docs/runbooks/livekit-degraded.md.
+
       # --- ops-level alerts (depend on external exporters Core does NOT ship) ---
 
       - alert: HealthzDown

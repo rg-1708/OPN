@@ -25,6 +25,7 @@ use uuid::Uuid;
 async fn group_state(
     admin: &PgPool,
     cap: i64,
+    max_rooms: i64,
     n: usize,
 ) -> (AppState, Uuid, Vec<Identity>) {
     let (world, tenant, _key) = seed_world_tenant(admin).await;
@@ -36,6 +37,7 @@ async fn group_state(
         api_secret: "devsecret".into(),
         empty_room_reap_secs: 300,
         max_participants_default: cap,
+        max_rooms,
     });
     let state = test_state(pool, cfg).await;
     let mut members = Vec::with_capacity(n);
@@ -89,7 +91,7 @@ fn state_of(parts: &[(Uuid, String)], who: Uuid) -> &str {
 /// stays active; last leave → ended.
 #[sqlx::test(migrator = "opn_core::MIGRATOR")]
 async fn create_join_leave_lifecycle(admin: PgPool) {
-    let (state, world, m) = group_state(&admin, 32, 2).await;
+    let (state, world, m) = group_state(&admin, 32, 50, 2).await;
     let (a, b) = (&m[0], &m[1]);
 
     let out = calls::group::create(&state, a, Some("crew".into()), None)
@@ -128,7 +130,7 @@ async fn create_join_leave_lifecycle(admin: PgPool) {
 #[sqlx::test(migrator = "opn_core::MIGRATOR")]
 async fn join_full_room_conflicts(admin: PgPool) {
     // cap = 1: the creator fills the single seat.
-    let (state, _world, m) = group_state(&admin, 1, 2).await;
+    let (state, _world, m) = group_state(&admin, 1, 50, 2).await;
     let out = calls::group::create(&state, &m[0], None, None).await.expect("create");
     let call_id = parse_call_id(&out);
     let err = calls::group::join(&state, &m[1], call_id).await.expect_err("full");
@@ -138,7 +140,7 @@ async fn join_full_room_conflicts(admin: PgPool) {
 /// end is creator-only: a non-creator gets `Forbidden`, the creator ends it.
 #[sqlx::test(migrator = "opn_core::MIGRATOR")]
 async fn end_is_creator_only(admin: PgPool) {
-    let (state, world, m) = group_state(&admin, 32, 2).await;
+    let (state, world, m) = group_state(&admin, 32, 50, 2).await;
     let (a, b) = (&m[0], &m[1]);
     let out = calls::group::create(&state, a, None, None).await.expect("create");
     let call_id = parse_call_id(&out);
@@ -155,7 +157,7 @@ async fn end_is_creator_only(admin: PgPool) {
 /// Joining an ended room → `Conflict`.
 #[sqlx::test(migrator = "opn_core::MIGRATOR")]
 async fn join_ended_room_conflicts(admin: PgPool) {
-    let (state, _world, m) = group_state(&admin, 32, 2).await;
+    let (state, _world, m) = group_state(&admin, 32, 50, 2).await;
     let out = calls::group::create(&state, &m[0], None, None).await.expect("create");
     let call_id = parse_call_id(&out);
     calls::group::end(&state, &m[0], call_id).await.expect("end");
@@ -163,12 +165,31 @@ async fn join_ended_room_conflicts(admin: PgPool) {
     assert!(matches!(err, Fail::Code(ErrCode::Conflict)), "got {err:?}");
 }
 
+/// Per-tenant concurrent-room cap (G3): at `max_rooms` active rooms the next
+/// `create` gets `Conflict`; ending one frees a slot (the RLS-scoped count sees
+/// only 'active' rooms, so an ended room does not hold a seat).
+#[sqlx::test(migrator = "opn_core::MIGRATOR")]
+async fn create_at_room_cap_conflicts(admin: PgPool) {
+    // Ceiling of one active room in the world.
+    let (state, _world, m) = group_state(&admin, 32, 1, 1).await;
+    let out = calls::group::create(&state, &m[0], None, None).await.expect("first room");
+    let first = parse_call_id(&out);
+
+    // Second create while the first is active → over the ceiling → Conflict.
+    let err = calls::group::create(&state, &m[0], None, None).await.expect_err("at cap");
+    assert!(matches!(err, Fail::Code(ErrCode::Conflict)), "got {err:?}");
+
+    // End the first → its slot frees → create succeeds again.
+    calls::group::end(&state, &m[0], first).await.expect("end frees slot");
+    calls::group::create(&state, &m[0], None, None).await.expect("room freed");
+}
+
 /// Janitor reap: an active SFU room that went empty without a clean leave (all
 /// participants 'left', session still 'active') and aged past the window is
 /// force-ended.
 #[sqlx::test(migrator = "opn_core::MIGRATOR")]
 async fn janitor_reaps_empty_group_room(admin: PgPool) {
-    let (state, world, m) = group_state(&admin, 32, 1).await;
+    let (state, world, m) = group_state(&admin, 32, 50, 1).await;
     let out = calls::group::create(&state, &m[0], None, None).await.expect("create");
     let call_id = parse_call_id(&out);
 
@@ -202,7 +223,7 @@ async fn janitor_reaps_empty_group_room(admin: PgPool) {
 /// webhook path).
 #[sqlx::test(migrator = "opn_core::MIGRATOR")]
 async fn webhook_participant_left_syncs_and_ends(admin: PgPool) {
-    let (state, world, m) = group_state(&admin, 32, 1).await;
+    let (state, world, m) = group_state(&admin, 32, 50, 1).await;
     let a = &m[0];
     let out = calls::group::create(&state, a, None, None).await.expect("create");
     let call_id = parse_call_id(&out);

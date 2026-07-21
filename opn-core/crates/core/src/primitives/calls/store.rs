@@ -566,15 +566,28 @@ async fn group_snapshot_in_tx(
 /// with `sfu_room_id = "grp_<id>"`, auto-joining as the first participant (the
 /// creator, identified later as the earliest `joined_at`). Returns the initial
 /// snapshot. `label`/`max_participants` are not persisted — there is no column
-/// for them (0014 adds only topology + sfu_room_id); the server cap is enforced
-/// at join.
+/// for them (0014 adds only topology + sfu_room_id); the participant cap is
+/// enforced at join. Fails `Conflict` when the world is already at its
+/// concurrent-room ceiling (`max_rooms`, G3).
 pub async fn group_create(
     pool: &PgPool,
     world: Uuid,
     creator: Uuid,
     creator_device: Uuid,
+    max_rooms: i64,
 ) -> Result<CallSnapshot, Fail> {
     let mut tx = world_tx(pool, world).await?;
+    // Per-tenant concurrent-room ceiling (G3). RLS (app.world_id, set by
+    // world_tx) scopes the count to this world, so no explicit world filter.
+    // ponytail: soft cap — two racing creates can both pass and overshoot by
+    // one room under READ COMMITTED; fine for an anti-abuse ceiling. Per-world
+    // advisory lock only if a hard invariant is ever needed.
+    let active_rooms: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM call_sessions WHERE topology = 'sfu' AND state = 'active'",
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    super::group::rooms_admit(active_rooms, max_rooms).map_err(Fail::Code)?;
     let call_id = new_id();
     let room = format!("grp_{call_id}");
     sqlx::query(

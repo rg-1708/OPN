@@ -5,8 +5,13 @@ sprints are scope-bound, not time-bound; each has Goal / Depends on / Work
 items / Test plan / Exit criteria. Core-side contract changes below go
 through a CDR in OPN-CORE.md before implementation.
 
-**Status (2026-07-21): G0 and G1 shipped** (contracts, LiveKit service,
-group-call primitive, token mint, webhook sync). G2 and G3 remain.
+**Status (2026-07-21): G0, G1, and G3 core-side shipped** (contracts, LiveKit
+service, group-call primitive, token mint, webhook sync; group rate limits,
+per-tenant concurrent-room cap, webhook-signature-failure alert, runbook). G2
+(client + web demo) targets `opn-web-conference` / `@opn/client`, now archived —
+out of scope until the web client returns. G3's two field validations (24 h soak
+with calls churning; kill-LiveKit chaos) run on the perf/prod host, not this dev
+workstation — see §G3.
 
 ## Why this doc exists
 
@@ -102,13 +107,25 @@ Exit: 3-way audio demo on dev stack, `npm run dev` only.
 **Goal**: safe to run on the prod host without watching it.
 **Depends on**: G2.
 
-Work items: rate limits on group commands; max concurrent rooms per tenant;
-soak run (24 h, calls churning) comparing p99 against the 16 ms baseline;
-runbook `runbooks/livekit-degraded.md` (LiveKit down ⇒ group calls fail
-closed, 1:1 and data plane unaffected); alert on webhook signature failures.
+Work items — code (shipped): rate limits on group commands (Social class,
+`infra/ratelimit.rs::class_of`); max concurrent rooms per tenant
+(`LIVEKIT_MAX_ROOMS`, default 50; `group::rooms_admit` enforced in
+`store::group_create`, RLS-scoped count → `Conflict` at the cap); runbook
+`runbooks/livekit-degraded.md`; alert on webhook signature failures
+(`opn_livekit_webhook_total{outcome="rejected"}` → `LivekitWebhookRejected` in
+`deploy/prometheus/alerts.yml`).
+
+Work items — field validation (perf/prod host, not the dev workstation): soak
+run (24 h, calls churning) comparing p99 against the 16 ms baseline; kill-LiveKit
+chaos. Note the fail-closed seam is config, not the running SFU: Core mints the
+access token locally and never calls the LiveKit server synchronously, so a
+*down* SFU degrades only client media — Core group commands fail closed only when
+LiveKit is *unconfigured* (`state.cfg.livekit == None` → every `calls.group.*`
+answers `forbidden`). The chaos drill therefore asserts the data plane + 1:1
+calls survive an SFU kill; the config fail-closed path is unit-covered in Core.
 
 Exit: soak passes with no baseline regression on the data plane; kill-LiveKit
-chaos test degrades only group calls.
+chaos test degrades only group-call media.
 
 ## Explicit non-goals (v1)
 
