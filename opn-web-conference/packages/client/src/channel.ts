@@ -75,6 +75,10 @@ export class ChannelStore {
   readonly #pending: ChatMessage[] = [];
   readonly #byMessageId = new Map<string, ChatMessage>();
   readonly #byClientUuid = new Map<string, ChatMessage>();
+  // Sends Core rejected for good (invalid/too_large). Kept visible as `failed`,
+  // but never resent and never adopted by a later send's fan-out echo — a dead
+  // entry sitting at #pending[0] would otherwise steal the next message's identity.
+  readonly #terminal = new WeakSet<ChatMessage>();
 
   readonly #typing = new Map<string, number>(); // character_id → expires-at ms
   readonly #receipts = new Map<string, Receipts>(); // character_id → watermarks
@@ -232,6 +236,7 @@ export class ChannelStore {
         const terminal = err instanceof OpnError && !["not_connected", "closed", "timeout"].includes(err.code);
         if (terminal) {
           this.#byClientUuid.delete(clientUuid);
+          this.#terminal.add(msg); // won't resend (would re-fail), won't be echo-adopted
         }
         this.#opts.onChange();
       });
@@ -316,13 +321,17 @@ export class ChannelStore {
       existing.at ??= p.at;
       return;
     }
-    if (p.sender === this.#opts.selfId && this.#pending.length > 0) {
-      // Our own send echoing back before its ack — adopt the oldest optimistic
-      // entry (per-connection send order == fan-out order) instead of appending
-      // a duplicate. Its ack lands later and no-ops.
-      const mine = this.#pending[0]!;
-      this.#promote(mine, p.message_id, p.seq, p.at);
-      return;
+    if (p.sender === this.#opts.selfId) {
+      // Our own send echoing back before its ack — adopt the oldest still-in-flight
+      // optimistic entry (per-connection send order == fan-out order) instead of
+      // appending a duplicate. A terminally-failed send is `failed`, not `sending`,
+      // so it's skipped and can't be mis-adopted (which would drop the real
+      // message). The adopted entry's own ack lands later and no-ops.
+      const mine = this.#pending.find((m) => m.status === "sending");
+      if (mine) {
+        this.#promote(mine, p.message_id, p.seq, p.at);
+        return;
+      }
     }
     const msg: ChatMessage = {
       key: p.message_id,
@@ -393,6 +402,7 @@ export class ChannelStore {
 
   #resendUnacked(): void {
     for (const msg of this.#pending) {
+      if (this.#terminal.has(msg)) continue; // Core rejected it for good — resending only re-fails
       if (msg.status === "failed" || msg.status === "sending") {
         msg.status = "sending";
         this.#dispatchSend(msg);

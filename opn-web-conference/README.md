@@ -7,11 +7,16 @@ lifecycle, resume, channels, presence, notify, and calls signaling against a sto
 Core. Two things outlive the demo UI: `@opn/client` (the framework-agnostic wire
 runtime) and a living proof that *any* UI can be built against the contracts.
 
-> **Status: Sprints W0–W2 built.** What's implemented today is the scaffold,
-> `dev-auth` (now with a lobby), the wire client (now with a chat store and a call
-> manager), and an app that authenticates, holds a self-healing session, walks
-> lobby → rooms → live chat, and places 1:1 voice/video calls. Only packaging
-> polish (W3) is not built yet. See the [roadmap](#status--roadmap).
+> **Status: Sprints W0–W2 built; W3 packaging in place.** What's implemented today
+> is the scaffold, `dev-auth` (now with a lobby), the wire client (now with a chat
+> store and a call manager), and an app that authenticates, holds a self-healing
+> session, walks lobby → rooms → live chat, and places 1:1 voice/video calls. W3
+> packaging is done bar human/infra sign-off: the config surface, fork guide, CI
+> (typecheck + unit tests + a standalone `@opn/client` build check, with the
+> real-Core smokes gated on a configured Core), and the durable-package extraction
+> check are all present. What remains is a **timed fresh-clone-to-first-call run by
+> a non-author** and a **CI run that actually includes the real-Core smoke** — both
+> operator actions, not code. See the [roadmap](#status--roadmap).
 
 ## Architecture
 
@@ -177,8 +182,10 @@ and delete the vendored copy. Details: [`packages/contracts/README.md`](packages
 | `npm run dev`       | Start the Vite app (proxies to dev-auth + Core).                         |
 | `npm test`          | Run the `@opn/client` unit tests (`node --test`, zero deps).            |
 | `npm run typecheck` | `tsc` over the client + app projects.                                                                |
+| `npm run build --workspace @opn/client` | Extraction check: build `@opn/client` standalone (browser-only JS + `.d.ts` to `dist/`). |
 | `npm run smoke`     | W0 wire smoke: mint a session and reach `live` against a dockerized Core. |
 | `npm run smoke:w1`  | W1 rooms + live-chat smoke: two sessions round-trip over a `ChannelStore` against a dockerized Core. |
+| `npm run smoke:w2`  | W2 calls smoke: three sessions prove the `calls.signal` relay + participant-only authz against a dockerized Core. |
 
 ## Status / roadmap
 
@@ -189,4 +196,9 @@ and delete the vendored copy. Details: [`packages/contracts/README.md`](packages
 - **W2 — done:** 1:1 voice/video calls over WebRTC, signaled through Core
   (`calls.*`) via the `@opn/client` `CallManager`; the browser adds an audio track
   the FiveM template leaves to pma-voice.
-- **W3:** packaging polish.
+- **W3 — in place:** config surface (`.env.example`), the fork guide (above), CI
+  (typecheck + unit tests + a standalone `@opn/client` build check; real-Core
+  smokes W0/W1/W2 gated behind a configured Core), and the durable-package
+  extraction check (`npm run build --workspace @opn/client`). Two exit criteria are
+  operator actions, not code: a timed fresh-clone-to-first-call run by a non-author,
+  and a CI run that includes the real-Core smoke (needs a reachable Core).

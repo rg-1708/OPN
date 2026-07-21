@@ -61,7 +61,25 @@ const active = (callId: string, kind: string) => ({
   },
 });
 
-async function build(startOverride?: (f: Frame) => unknown): Promise<{
+const ended = (callId: string, kind: string) => ({
+  topic: `call:${callId}`,
+  evt: "calls.state",
+  payload: {
+    call_id: callId,
+    kind,
+    state: "ended",
+    participants: [
+      { character_id: SELF, state: "left" },
+      { character_id: PEER, state: "left" },
+    ],
+    ice_servers: [],
+  },
+});
+
+async function build(
+  startOverride?: (f: Frame) => unknown,
+  getMedia?: () => Promise<MediaStream>,
+): Promise<{
   mgr: CallManager;
   peers: FakePeer[];
   sent: () => Frame[];
@@ -89,7 +107,7 @@ async function build(startOverride?: (f: Frame) => unknown): Promise<{
   const mgr = createCallManager(conn, {
     selfId: SELF,
     onChange: () => {},
-    getMedia: () => Promise.resolve(fakeStream()),
+    getMedia: getMedia ?? (() => Promise.resolve(fakeStream())),
     peerFactory: () => {
       const p = new FakePeer();
       peers.push(p);
@@ -191,6 +209,60 @@ test("callee: ring → accept answers the offer, sends no offer of its own", asy
   const answer = h.sent().find((f) => f.cmd === "calls.signal" && f.payload.payload?.kind === "answer");
   assert.ok(answer, "callee answered the incoming offer");
   assert.equal(answer!.payload.to, PEER);
+});
+
+test("call ending during getUserMedia stops the tracks and builds no link (no media leak)", async () => {
+  let resolveMedia!: (s: MediaStream) => void;
+  const stopped: number[] = [];
+  const heldStream = { getTracks: () => [{ stop: () => stopped.push(1) }] } as unknown as MediaStream;
+  const h = await build(undefined, () => new Promise<MediaStream>((r) => (resolveMedia = r)));
+
+  await h.mgr.start("5550009", true);
+  h.serverSend(active("call1", "video")); // → phase active → #enterCall awaits getUserMedia
+  await tick();
+  assert.equal(h.mgr.view().phase, "active");
+
+  // The peer hangs up (or ring times out) while our media is still resolving.
+  h.serverSend(ended("call1", "video"));
+  await tick();
+  assert.equal(h.mgr.view().phase, "ended");
+
+  // Media finally resolves: the guard must stop the tracks and not wire up a call.
+  resolveMedia(heldStream);
+  await settle();
+  assert.deepEqual(stopped, [1], "acquired media tracks were stopped");
+  assert.equal(h.peers.length, 0, "no PeerLink built after the call ended");
+  assert.ok(!h.sent().some((f) => f.cmd === "calls.signal"), "no WebRTC signal on a dead call");
+});
+
+test("a stale 'ended' view does not block the next incoming ring", async () => {
+  const h = await build();
+  await h.mgr.start("5550010", false);
+  h.serverSend(ended("call1", "voice"));
+  await tick();
+  assert.equal(h.mgr.view().phase, "ended");
+
+  // A fresh ring arrives before the user dismisses the ended card — must ring, not auto-decline.
+  h.mgr.onRing("call2");
+  await tick();
+  assert.equal(h.mgr.view().phase, "ringing");
+  assert.equal(h.mgr.view().callId, "call2");
+  assert.ok(
+    !h.sent().some((f) => f.cmd === "calls.decline" && f.payload.call_id === "call2"),
+    "the new ring was not swallowed by the stale ended view",
+  );
+});
+
+test("dialing out after a stale 'ended' view starts a fresh call", async () => {
+  const h = await build();
+  await h.mgr.start("5550011", false);
+  h.serverSend(ended("call1", "voice"));
+  await tick();
+  assert.equal(h.mgr.view().phase, "ended");
+
+  await h.mgr.start("5550012", true);
+  assert.equal(h.mgr.view().phase, "calling", "the call-back button works without a manual Close");
+  assert.equal(h.mgr.view().isCaller, true);
 });
 
 test("callee: decline sends calls.decline and ends", async () => {

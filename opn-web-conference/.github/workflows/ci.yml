@@ -16,10 +16,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      # No committed lockfile yet, so `npm install` rather than `npm ci`.
-      - run: npm install
+      # Lockfile is committed → `npm ci` for reproducible, from-scratch installs.
+      - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      # Extraction check (roadmap W3): @opn/client must build standalone — emit
+      # browser-only JS + declarations from src alone (only @opn/contracts as a
+      # dep). Proves the wire runtime is portable to the FiveM template's SDK.
+      - run: npm run build --workspace @opn/client
 
   # Real-Core smoke (W0 + W1 + W2). Runs only when a Core is configured for CI:
   # set the repo VARIABLE `OPN_CORE_URL` (a reachable dev/staging Core, e.g. on a
@@ -37,7 +41,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - run: npm install
+      - run: npm ci
       - name: Real-Core smoke
         if: ${{ vars.OPN_CORE_URL != '' }}
         env:

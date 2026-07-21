@@ -217,6 +217,7 @@ export class CallManager {
 
   /** Dial `calleeNumber`. No-op if a call is already in flight (Core enforces 1:1 too). */
   async start(calleeNumber: string, video: boolean): Promise<void> {
+    if (this.#view.phase === "ended") this.#view = CallManager.#idle(); // clear a stale ended card
     if (this.#view.phase !== "idle") return;
     this.#view = {
       ...CallManager.#idle(),
@@ -248,6 +249,7 @@ export class CallManager {
    * reaches us as an `ended` snapshot. A ring while already busy is declined.
    */
   onRing(callId: string): void {
+    if (this.#view.phase === "ended") this.#view = CallManager.#idle(); // a stale ended card must not swallow a fresh ring
     if (this.#view.phase !== "idle") {
       void this.#conn.cmd({ cmd: "calls.decline", payload: { call_id: callId } }).catch(() => {});
       return;
@@ -349,7 +351,16 @@ export class CallManager {
     if (this.#entering || this.#link) return;
     this.#entering = true;
     try {
+      const callId = this.#view.callId;
       const stream = await this.#getMedia(this.#view.kind);
+      // The call can end (hangup / ring-timeout / peer decline) while getUserMedia
+      // is still resolving. If it did, stop the tracks we just acquired and bail —
+      // otherwise the camera/mic stay live on an orphan stream nothing ever closes,
+      // and start() would fire a `calls.signal` on a dead call.
+      if (this.#view.phase !== "active" || this.#view.callId !== callId) {
+        for (const t of stream.getTracks()) t.stop();
+        return;
+      }
       this.#view.localStream = stream;
       this.#link = new PeerLink({
         pc: this.#peerFactory({ iceServers }),

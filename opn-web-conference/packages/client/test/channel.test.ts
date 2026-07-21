@@ -201,6 +201,74 @@ test("resume_overflow drops acked state and triggers a cold-load", async () => {
   assert.equal(h.store.messages().length, 1, "no duplicate after cold-load");
 });
 
+test("a terminally-rejected send stays failed and never steals the next message's identity", async () => {
+  // Core rejects the first send for good (invalid), then accepts the second and
+  // fans its echo out before the ack (the usual ordering). The dead first send
+  // must NOT be adopted by the second's echo.
+  let n = 0;
+  const responder: Responder = (f) => {
+    if (f.cmd === "auth") return { reply_to: f.id, ok: true };
+    if (f.cmd === "channels.send") {
+      n += 1;
+      if (n === 1) return { reply_to: f.id, ok: false, err: { code: "invalid", msg: "bad body" } };
+      const echo = {
+        topic: `ch:${CH}`,
+        evt: "channels.message",
+        payload: { channel_id: CH, message_id: "m2", seq: 2, sender: SELF, body: {}, at: "t2" },
+      };
+      return [echo, { reply_to: f.id, ok: true, payload: { message_id: "m2", seq: 2 } }];
+    }
+    return { reply_to: f.id, ok: true };
+  };
+  const h = await build(responder);
+
+  h.store.send({ text: "A-bad", media_ids: null, gif_url: null, meta: null });
+  await tick();
+  await tick();
+  let msgs = h.store.messages();
+  assert.equal(msgs.length, 1);
+  assert.equal(msgs[0]!.status, "failed", "terminal reject surfaces as failed");
+
+  h.store.send({ text: "B-good", media_ids: null, gif_url: null, meta: null });
+  await tick();
+  await tick();
+  msgs = h.store.messages();
+  assert.equal(msgs.length, 2, "the failed send did not swallow the good one");
+  const b = msgs.find((m) => m.messageId === "m2");
+  assert.ok(b, "the good message reconciled to its own message_id");
+  assert.equal((b!.body as { text: string }).text, "B-good", "kept its own body");
+  assert.equal(b!.status, "sent");
+  const a = msgs.find((m) => m.status === "failed");
+  assert.equal((a!.body as { text: string }).text, "A-bad", "failed send still shows its own text");
+});
+
+test("a terminally-rejected send is not resent on reconnect", async () => {
+  let n = 0;
+  const responder: Responder = (f) => {
+    if (f.cmd === "auth") return { reply_to: f.id, ok: true };
+    if (f.cmd === "channels.send") {
+      n += 1;
+      return { reply_to: f.id, ok: false, err: { code: "invalid", msg: "bad body" } };
+    }
+    return { reply_to: f.id, ok: true };
+  };
+  const h = await build(responder);
+  h.store.send({ text: "nope", media_ids: null, gif_url: null, meta: null });
+  await tick();
+  await tick();
+  assert.equal(n, 1, "sent once");
+  assert.equal(h.store.messages()[0]!.status, "failed");
+  // Bounce the socket → live again → resend logic runs, but must skip the terminal one.
+  h.factory.last.serverClose(4409);
+  await tick();
+  h.clock.advance(1);
+  h.factory.last.open();
+  await tick();
+  await tick();
+  assert.equal(h.conn.state, "live");
+  assert.equal(n, 1, "terminal reject not resent on reconnect");
+});
+
 test("receipts and typing surface per-peer, self filtered out", async () => {
   const h = await build();
   const sock = h.factory.last;
