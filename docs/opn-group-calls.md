@@ -1,10 +1,12 @@
 # OPN — Group Voice Calls (draft v0.1)
 
-Companion to [OPN-CORE.md](OPN-CORE.md) §10.4 (calls) and
-[opn-core-roadmap.md](opn-core-roadmap.md) Sprint 6. Same reading rules:
+Companion to [OPN-CORE.md](OPN-CORE.md) §10.4 (calls). Same reading rules:
 sprints are scope-bound, not time-bound; each has Goal / Depends on / Work
 items / Test plan / Exit criteria. Core-side contract changes below go
 through a CDR in OPN-CORE.md before implementation.
+
+**Status (2026-07-21): G0 and G1 shipped** (contracts, LiveKit service,
+group-call primitive, token mint, webhook sync). G2 and G3 remain.
 
 ## Why this doc exists
 
@@ -76,44 +78,10 @@ LiveKit clients reach it directly over UDP/TCP fallback.
 
 | # | Name | Depends on | Delivers |
 |---|---|---|---|
-| G0 | Contracts + infra | Core Sprint 6 | CDR merged, contracts types, livekit service in dev compose, health checked |
-| G1 | Group-call primitive | G0 | FSM + store + token mint + webhook sync, HTTP active-calls includes groups |
+| G0 | Contracts + infra | Core Sprint 6 | **done** — CDR merged, contracts types, livekit service in dev compose, health checked |
+| G1 | Group-call primitive | G0 | **done** — FSM + store + token mint + webhook sync, HTTP active-calls includes groups |
 | G2 | Client + proof | G1 | `@opn/client` group-call support, minimal group-voice demo in web template |
 | G3 | Hardening | G2 | limits, janitor, perf soak with calls active, runbook |
-
-## Sprint G0 — Contracts + infra
-
-**Goal**: the wire and deploy surface exists; no behavior yet.
-**Depends on**: Core Sprint 6.
-
-Work items: CDR in OPN-CORE.md; `contracts` additions above (enums + types
-only); `livekit` service in `docker-compose.dev.yml` with pinned version;
-Core config keys (`LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`);
-startup health check that logs (not fails) when LiveKit is unreachable.
-
-Test plan: drift gate passes; compose up brings LiveKit healthy.
-Exit: contracts published additively; dev stack runs with LiveKit; zero
-runtime behavior change.
-
-## Sprint G1 — Group-call primitive
-
-**Goal**: create/join/leave works end to end against real LiveKit.
-**Depends on**: G0.
-
-Work items: `primitives/calls/group.rs` (FSM as pure functions, same style
-as `fsm.rs`); migration for `topology` + `sfu_room_id`; token mint via
-LiveKit's JWT scheme (reuse existing jsonwebtoken dep — no LiveKit server
-SDK needed for signing); webhook endpoint `POST /v1/internal/livekit/webhook`
-(signature-verified, on the **public** app_router — the admin/loopback bind is
-unreachable from the LiveKit container in prod, so the JWT-over-body-hash
-signature is the trust boundary, not the network bind); membership rules (any tenant member may
-create; cap participants, config default 32 to match channel cap); janitor
-reaps rooms empty > N minutes.
-
-Test plan: unit tests on FSM transitions; integration test create→join→
-webhook joined→leave→room reaped; forged/unsigned webhook rejected.
-Exit: two test clients exchange audio through LiveKit using only Core-minted
-tokens; `calls.group.state` snapshots correct through the whole lifecycle.
 
 ## Sprint G2 — Client + proof
 

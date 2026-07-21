@@ -2,8 +2,8 @@
 
 Backs up and restores opn-core's Postgres (and, best-effort, media) via the
 scripts in [opn-core/deploy/backup/](../../opn-core/deploy/backup). The DB backup
-is the **non-negotiable**: DB loss is fatal, media loss is cosmetic
-([roadmap §3](../opn-core-roadmap.md)). One dump of the `opn` database, streamed
+is the **non-negotiable**: DB loss is fatal, media loss is cosmetic.
+One dump of the `opn` database, streamed
 off-box, is the whole recovery story — everything else here exists to make that
 dump restorable and to prove it.
 
@@ -136,7 +136,7 @@ http://localhost:8080/healthz`).
 
 ## 5. Verifying — the drill
 
-*An untested backup is a wish, not a backup* ([roadmap §3](../opn-core-roadmap.md)).
+*An untested backup is a wish, not a backup.*
 [restore-drill.sh](../../opn-core/deploy/backup/restore-drill.sh) is the periodic
 proof: it scripts one full **backup → destroy the DB volume → restore into a fresh
 stack → verify** cycle, reusing the real `pg-backup.sh` and `pg-restore.sh`, and

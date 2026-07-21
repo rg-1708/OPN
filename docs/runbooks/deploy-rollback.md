@@ -75,7 +75,7 @@ step** — set `OPN_DB_APP_PASSWORD` and deploy.
 
 1. Merge to the release branch / push the tag.
 2. Coolify rebuilds the image and does a healthz-gated rolling replace. Migrations
-   are forward-only ([roadmap §8](../opn-core-roadmap.md)); Core runs any new ones
+   are forward-only; Core runs any new ones
    at startup as the owner role before serving.
 3. Verify (§5).
 

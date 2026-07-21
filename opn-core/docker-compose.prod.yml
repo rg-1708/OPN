@@ -197,9 +197,9 @@ services:
           port_range_end: 50060
           use_external_ip: true
         keys:
-          ${OPN_LIVEKIT_API_KEY}: ${OPN_LIVEKIT_API_SECRET}
+          "${OPN_LIVEKIT_API_KEY}": "${OPN_LIVEKIT_API_SECRET}"
         webhook:
-          api_key: ${OPN_LIVEKIT_API_KEY}
+          api_key: "${OPN_LIVEKIT_API_KEY}"
           urls:
             - http://core:8080/v1/internal/livekit/webhook
     labels:

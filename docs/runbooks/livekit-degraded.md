@@ -25,8 +25,9 @@ Blast radius of a LiveKit outage = group-call audio only.
 
 1. Is the container up?
    ```bash
-   docker compose -f docker-compose.prod.yml ps livekit
-   docker compose -f docker-compose.prod.yml logs --tail 50 livekit
+   # Coolify runs the stack from its own dir — target the container directly:
+   docker ps --filter name=livekit
+   docker logs --tail 50 $(docker ps -q --filter name=livekit)
    ```
 2. Signal reachable? `curl -fsS https://livekit.<domain>` (Traefik-routed
    7880; TLS/router problems show here, not in the livekit log).
@@ -40,8 +41,8 @@ Blast radius of a LiveKit outage = group-call audio only.
 
 ## Recovery
 
-- Restart is safe and stateless: `docker compose -f docker-compose.prod.yml
-  restart livekit`. In-flight group calls drop and clients rejoin (fresh
+- Restart is safe and stateless: `docker restart $(docker ps -q --filter
+  name=livekit)`. In-flight group calls drop and clients rejoin (fresh
   token via `calls.group.join`); Core state self-heals via webhooks + janitor.
 - Version pin is deliberate (`livekit/livekit-server:v1.13.4`). Upgrade =
   change the pin, redeploy, verify a 3-way call on the dev stack first

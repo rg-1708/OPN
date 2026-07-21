@@ -9,8 +9,7 @@ destroy money silently.
 This document is the contract for the **bridge** — the framework-side code
 (other repo) that talks to Core's HTTP exchange endpoints. It is normative:
 Core's behavior is exactly what is written here. Companion to
-[OPN-CORE.md §10.5](OPN-CORE.md) (design) and
-[opn-core-roadmap.md](opn-core-roadmap.md) Sprint 7 (build).
+[OPN-CORE.md §10.5](OPN-CORE.md) (design).
 
 ---
 

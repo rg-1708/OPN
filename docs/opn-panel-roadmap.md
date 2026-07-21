@@ -1,9 +1,12 @@
 # OPN Panel — Admin Dashboard Roadmap (draft v0.1)
 
-Companion to [opn-core-roadmap.md](opn-core-roadmap.md) and
-[OPN-CORE.md](OPN-CORE.md). Same reading rules: sprints scope-bound, each
-has Goal / Depends on / Work items / Test plan / Exit criteria; Core-side
-changes go through a CDR first.
+Companion to [OPN-CORE.md](OPN-CORE.md). Same reading rules: sprints
+scope-bound, each has Goal / Depends on / Work items / Test plan / Exit
+criteria; Core-side changes go through a CDR first.
+
+**Status (2026-07-21): P0 and P1 shipped** (admin bind, login, read
+endpoints, audit table, full tenant/key mutations). P2 (panel SPA) and P3
+(ops polish) remain.
 
 ## Why this doc exists — and the anti-goal it overrides
 
@@ -81,39 +84,10 @@ immediate-cut v1; grace-period dual-key is gated.
 
 | # | Name | Depends on | Delivers |
 |---|---|---|---|
-| P0 | Admin API read-only + auth | — | admin bind, login, list/stats endpoints, audit table |
-| P1 | Mutations | P0 | create / rotate-key / freeze / unfreeze, audit rows |
+| P0 | Admin API read-only + auth | — | **done** — admin bind, login, list/stats endpoints, audit table |
+| P1 | Mutations | P0 | **done** — create / rotate-key / freeze / unfreeze, audit rows |
 | P2 | Panel SPA | P1 | login page, tenant table, create/rotate flows with show-once key modal, stats header |
 | P3 | Ops polish | P2 | deploy wiring, runbook, prod compose entry |
-
-## Sprint P0 — Admin API read-only + auth
-
-**Goal**: private bind exists; operator can log in and see state; nothing
-can be changed yet.
-
-Work items: `admin_router` + bind config (`ADMIN_BIND`, default loopback,
-startup guard vs public bind); `POST /admin/v1/login` (argon2 verify, rate
-limit, admin JWT); extractor `AdminIdentity`; `GET tenants`, `GET stats`;
-migration `admin_audit` table.
-
-Test plan: wrong password 401 (rate-limited); expired JWT 401; tenants list
-matches DB; public bind returns 404 for `/admin/*`.
-Exit: curl through SSH tunnel: login → list tenants. Public surface
-unchanged (contract tests still green).
-
-## Sprint P1 — Mutations
-
-**Goal**: full tenant/key lifecycle over HTTP.
-
-Work items: create-tenant (share one code path with the CLI — extract the
-existing admin.rs logic into a callable, don't duplicate it); rotate-key;
-freeze/unfreeze (same extraction from CLI unfreeze); audit row per mutation;
-show-once semantics (raw key only in response body).
-
-Test plan: create → session mint with new key succeeds; rotate → old key
-401 immediately, new key works; freeze → tenant sessions refused; every
-mutation has an audit row; raw key absent from logs and audit.
-Exit: full key lifecycle via curl; CLI paths still pass their tests.
 
 ## Sprint P2 — Panel SPA
 

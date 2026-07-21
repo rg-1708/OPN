@@ -1,7 +1,7 @@
 # OPN FiveM Resource UI Template — Roadmap (draft v0.1)
 
 Companion to [OPN.md](OPN.md) §§7, 10 (perf budget, devices & SDK, lb-compat)
-and [opn-core-roadmap.md](opn-core-roadmap.md). Same reading rules: sprints
+and [OPN-CORE.md](OPN-CORE.md). Same reading rules: sprints
 are **scope-bound, not time-bound**; Goal / Depends on / Work items /
 Test plan / Exit criteria per sprint; OPN.md wins on any conflict (ADR-5
 governs lb-compat); Core-side changes go through a CDR first.

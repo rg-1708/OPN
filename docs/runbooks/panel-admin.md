@@ -22,7 +22,10 @@ tunnel is the front door and the transport security.
 1. Generate the password hash (reads stdin — never puts the password in argv
    or shell history):
    ```bash
-   docker compose -f docker-compose.prod.yml exec core /opn-core admin hash-password
+   # Coolify runs the stack from its own dir, so target the container directly
+   # (-i: the command reads the password from stdin):
+   docker ps --format '{{.Names}}' | grep -i core
+   docker exec -i <container-name> opn-core admin hash-password
    # or locally: cargo run -p opn-core -- admin hash-password
    # type the password, press Enter, Ctrl-D
    ```
@@ -57,7 +60,7 @@ The data plane is unaffected (separate router, separate task). Break-glass is
 the CLI, same as before the panel existed:
 
 ```bash
-docker compose -f docker-compose.prod.yml exec core /opn-core admin create-tenant --name x --new-world x
+docker exec <container-name> opn-core admin create-tenant --name x --new-world x
 ```
 
 ## Watch for

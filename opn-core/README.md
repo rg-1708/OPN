@@ -83,4 +83,4 @@ into every `calls.state` snapshot; video bytes go P2P or via coturn (the dev
 `coturn` compose service), never through Core. Set `OPN_ICE_SERVERS` (see
 `.env.example`) to point clients at your relay.
 
-See [../docs/OPN-CORE.md](../docs/OPN-CORE.md) for architecture and [../docs/opn-core-roadmap.md](../docs/opn-core-roadmap.md) for the roadmap.
+See [../docs/OPN-CORE.md](../docs/OPN-CORE.md) for architecture.
