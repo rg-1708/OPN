@@ -29,7 +29,6 @@ fn admin_state(admin: PgPool) -> (AdminState, String) {
     let (token, _) = mint_admin_jwt(&secret).expect("mint admin jwt");
     let state = AdminState {
         pg: admin,
-        password_hash: Arc::new(String::new()),
         jwt_secret: Arc::new(secret),
         login_limits: Arc::new(RateLimitTable::default()),
     };
@@ -75,8 +74,14 @@ async fn key_authenticates(app: &PgPool, key: &str) -> Option<Uuid> {
 async fn create_returns_raw_key_once_and_audits_without_it(admin: PgPool) {
     let (state, token) = admin_state(admin.clone());
 
-    let (status, body) = admin_req(&state, &token, "POST", "/admin/v1/tenants", r#"{"name":"acme"}"#)
-        .await;
+    let (status, body) = admin_req(
+        &state,
+        &token,
+        "POST",
+        "/admin/v1/tenants",
+        r#"{"name":"acme"}"#,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let v: Value = serde_json::from_slice(&body).expect("json");
     let raw = v["api_key"].as_str().expect("api_key present").to_string();
@@ -108,7 +113,12 @@ async fn create_returns_raw_key_once_and_audits_without_it(admin: PgPool) {
     let (status, body) = admin_req(&state, &token, "GET", "/admin/v1/tenants", "").await;
     assert_eq!(status, StatusCode::OK);
     let list: Value = serde_json::from_slice(&body).expect("list json");
-    let row = list.as_array().expect("array").iter().next().expect("one tenant");
+    let row = list
+        .as_array()
+        .expect("array")
+        .iter()
+        .next()
+        .expect("one tenant");
     assert_eq!(row["frozen"], Value::Bool(false));
 }
 
@@ -203,7 +213,10 @@ async fn freeze_refuses_mint_unfreeze_restores(admin: PgPool) {
     // List reflects the freeze.
     let (_s, body) = admin_req(&state, &token, "GET", "/admin/v1/tenants", "").await;
     let list: Value = serde_json::from_slice(&body).expect("list");
-    assert_eq!(list.as_array().expect("array")[0]["frozen"], Value::Bool(true));
+    assert_eq!(
+        list.as_array().expect("array")[0]["frozen"],
+        Value::Bool(true)
+    );
 
     let (status, _) = admin_req(
         &state,
@@ -231,4 +244,94 @@ async fn freeze_refuses_mint_unfreeze_restores(admin: PgPool) {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// First-launch password setup (opn-panel-roadmap.md, DB-backed auth): status
+/// flips false→true, setup is one-shot (409 after), min length is enforced, and
+/// the stored hash actually verifies at login. A fresh limiter per phase avoids
+/// tripping the login/setup rate cap (burst 3). Unauthed endpoints — the empty
+/// bearer is ignored.
+#[sqlx::test(migrator = "opn_core::MIGRATOR")]
+async fn setup_is_one_shot_then_login_verifies(admin: PgPool) {
+    let json = |b: &[u8]| serde_json::from_slice::<Value>(b).expect("json");
+    const PW: &str = "correct horse battery"; // 21 chars, ≥ 12
+
+    let (state, _t) = admin_state(admin.clone());
+
+    // Fresh DB: no password set.
+    let (s, body) = admin_req(&state, "", "GET", "/admin/v1/status", "").await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(json(&body)["configured"], Value::Bool(false));
+
+    // Below the 12-char floor → rejected, still not configured.
+    let (s, _) = admin_req(
+        &state,
+        "",
+        "POST",
+        "/admin/v1/setup",
+        r#"{"password":"short"}"#,
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+
+    // Setup succeeds and hands back a working admin token (auto-login).
+    let (s, body) = admin_req(
+        &state,
+        "",
+        "POST",
+        "/admin/v1/setup",
+        &format!(r#"{{"password":"{PW}"}}"#),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let token = json(&body)["token"].as_str().expect("token").to_string();
+    let (s, _) = admin_req(&state, &token, "GET", "/admin/v1/tenants", "").await;
+    assert_eq!(s, StatusCode::OK, "setup token authorizes a real action");
+
+    // Now configured, and a setup row was audited.
+    let (_s, body) = admin_req(&state, "", "GET", "/admin/v1/status", "").await;
+    assert_eq!(json(&body)["configured"], Value::Bool(true));
+    let n: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM admin_audit WHERE action = 'admin_setup'")
+            .fetch_one(&admin)
+            .await
+            .expect("audit count");
+    assert_eq!(n, 1, "setup writes exactly one audit row");
+
+    // One-shot: a second setup is refused (fresh limiter).
+    let (state2, _t) = admin_state(admin.clone());
+    let (s, _) = admin_req(
+        &state2,
+        "",
+        "POST",
+        "/admin/v1/setup",
+        r#"{"password":"another password here"}"#,
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT, "setup is one-shot");
+
+    // Login verifies against the STORED hash: wrong rejected, right accepted.
+    let (state3, _t) = admin_state(admin.clone());
+    let (s, _) = admin_req(
+        &state3,
+        "",
+        "POST",
+        "/admin/v1/login",
+        r#"{"password":"wrong"}"#,
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let (s, body) = admin_req(
+        &state3,
+        "",
+        "POST",
+        "/admin/v1/login",
+        &format!(r#"{{"password":"{PW}"}}"#),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(
+        json(&body)["token"].as_str().is_some(),
+        "login mints a token"
+    );
 }

@@ -5,16 +5,15 @@ use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
 
-/// Admin panel surface (opn-panel-roadmap.md Sprint P0). `Some` only when both
-/// secrets are set — otherwise the admin router is disabled and existing
-/// deploys keep working unchanged.
+/// Admin panel surface (opn-panel-roadmap.md Sprint P0). `Some` only when
+/// `ADMIN_JWT_SECRET` is set — otherwise the admin router is disabled and
+/// existing deploys keep working unchanged. The login password lives in the DB
+/// (set on first launch), not here.
 #[derive(Debug)]
 pub struct AdminConfig {
     /// Private bind, loopback/VPN-only. Startup refuses a value equal to the
     /// public or metrics bind (cross-cutting rule 1).
     pub bind: SocketAddr,
-    /// argon2id PHC string; the login password is verified against it.
-    pub password_hash: String,
     /// Signing key for admin JWTs — SEPARATE from `jwt_secret` so an admin
     /// token and a tenant session token can never verify as each other.
     pub jwt_secret: String,
@@ -137,16 +136,17 @@ impl Config {
         let bind: SocketAddr = parse("OPN_BIND", req("OPN_BIND")?)?;
         let metrics_bind: SocketAddr = parse("OPN_METRICS_BIND", req("OPN_METRICS_BIND")?)?;
 
-        // Admin panel (Sprint P0): enabled only when both secrets are present.
-        // Absent → None → router disabled (main logs one line), so deploys that
-        // never set these keep running exactly as before. Empty counts as
-        // absent — compose `${VAR:-}` expansions must not half-enable this.
+        // Admin panel (Sprint P0; auth reworked): enabled by ADMIN_JWT_SECRET
+        // alone. The password is NOT env any more — it is set on first launch via
+        // the panel and stored in the DB (migration 0016). ADMIN_PASSWORD_HASH is
+        // gone: shipping an argon2 PHC string through env/compose interpolation
+        // shredded its `$`-delimited fields, so every login failed. A JWT secret
+        // (`openssl rand -base64`) has no `$`, so it stays in env safely. Absent →
+        // None → router disabled (main logs one line). Empty counts as absent —
+        // compose `${VAR:-}` expansions must not half-enable this.
         let nonempty = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
-        let admin = match (
-            nonempty("ADMIN_PASSWORD_HASH"),
-            nonempty("ADMIN_JWT_SECRET"),
-        ) {
-            (Some(password_hash), Some(jwt_secret)) => {
+        let admin = match nonempty("ADMIN_JWT_SECRET") {
+            Some(jwt_secret) => {
                 let admin_bind: SocketAddr =
                     opt("ADMIN_BIND", SocketAddr::from(([127, 0, 0, 1], 9091)))?;
                 // Cross-cutting rule 1: the admin surface never rides the public
@@ -158,12 +158,11 @@ impl Config {
                 }
                 Some(AdminConfig {
                     bind: admin_bind,
-                    password_hash,
                     jwt_secret,
                     panel_dir: nonempty("ADMIN_PANEL_DIR").map(std::path::PathBuf::from),
                 })
             }
-            _ => None,
+            None => None,
         };
 
         // LiveKit / group calls (Sprint G1): enabled only when all three vars

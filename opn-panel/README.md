@@ -7,8 +7,9 @@ password; the JWT lives in browser memory only (no secrets at rest).
 
 ## Dev
 
-Core must be running with the admin router enabled — set both `ADMIN_PASSWORD_HASH`
-(`opn-core admin hash-password` output) and `ADMIN_JWT_SECRET` in Core's env.
+Core must be running with the admin router enabled — set `ADMIN_JWT_SECRET` in
+Core's env (that alone turns it on). The admin password is **not** env: on first
+launch the panel shows a "set password" screen and stores the hash in Core's DB.
 Leave `ADMIN_PANEL_DIR` **unset** in dev; Vite serves the SPA and proxies.
 
 ```sh

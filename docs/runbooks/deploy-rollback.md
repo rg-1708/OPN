@@ -24,7 +24,7 @@ secret store. Set all of these on the app before the first deploy:
 | `OPN_RUST_LOG` | Core log filter | optional, defaults to `info` |
 | `OPN_LIVEKIT_URL` | Core → group-call join acks | optional; the public wss host of the livekit Traefik router (e.g. `wss://livekit.example.com`); unset/empty → group calls off |
 | `OPN_LIVEKIT_API_KEY` / `OPN_LIVEKIT_API_SECRET` | Core token mint + livekit `keys:` + webhook auth | optional; all three LiveKit vars set or none — see [livekit-degraded.md](livekit-degraded.md) |
-| `OPN_ADMIN_PASSWORD_HASH` / `OPN_ADMIN_JWT_SECRET` | Core admin API (port 9091, host loopback) | optional; both or neither; unset/empty → admin surface off — see [panel-admin.md](panel-admin.md) |
+| `OPN_ADMIN_JWT_SECRET` | Core admin API + panel (port 9091, host loopback) | optional; unset/empty → admin surface off. Password is set on first launch via the panel, not env — see [panel-admin.md](panel-admin.md) |
 
 ## 1. Traefik TLS notes (Coolify host)
 

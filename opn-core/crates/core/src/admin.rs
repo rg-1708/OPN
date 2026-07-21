@@ -13,37 +13,19 @@ use crate::infra::ids::new_id;
 const USAGE: &str = "usage: admin create-tenant --name <tenant-name> \
                      (--world <uuid> | --new-world <world-name>)";
 const UNFREEZE_USAGE: &str = "usage: admin unfreeze --world <uuid> --account <uuid>";
-const HASH_USAGE: &str = "usage: admin hash-password  (reads the password from stdin)";
 
 /// Entry point for `argv[1] == "admin"`. Hand-parsed (no clap).
 pub async fn run(args: &[String]) -> Result<()> {
     match args.first().map(String::as_str) {
         Some("create-tenant") => create_tenant(&args[1..]).await,
         Some("unfreeze") => unfreeze(&args[1..]).await,
-        Some("hash-password") => hash_password(),
-        _ => bail!("{USAGE}\n{UNFREEZE_USAGE}\n{HASH_USAGE}"),
+        _ => bail!("{USAGE}\n{UNFREEZE_USAGE}"),
     }
-}
-
-/// Produce the argon2id PHC string for `ADMIN_PASSWORD_HASH` (panel login,
-/// opn-panel-roadmap.md). Reads the password from stdin — never argv, so it
-/// stays out of shell history and `ps`.
-fn hash_password() -> Result<()> {
-    use std::io::Read;
-    let mut password = String::new();
-    std::io::stdin()
-        .read_to_string(&mut password)
-        .context("read password from stdin")?;
-    let password = password.trim_end_matches(['\r', '\n']);
-    if password.is_empty() {
-        bail!("empty password\n{HASH_USAGE}");
-    }
-    println!("{}", hash_admin_password(password)?);
-    Ok(())
 }
 
 /// argon2id with default params — the same verifier config
-/// `http::admin::verify_password` uses, so hashes minted here always verify.
+/// `http::admin::verify_password` uses, so a hash minted here always verifies.
+/// Used by the panel's first-launch setup endpoint (`POST /admin/v1/setup`).
 pub fn hash_admin_password(password: &str) -> Result<String> {
     use argon2::password_hash::{PasswordHasher, SaltString};
     use rand::RngCore;

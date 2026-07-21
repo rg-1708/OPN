@@ -67,14 +67,15 @@ services:
       LIVEKIT_URL: ${OPN_LIVEKIT_URL:-}
       LIVEKIT_API_KEY: ${OPN_LIVEKIT_API_KEY:-}
       LIVEKIT_API_SECRET: ${OPN_LIVEKIT_API_SECRET:-}
-      # Admin panel API + SPA (docs/opn-panel-roadmap.md). Both unset/empty →
-      # admin surface disabled. When enabled, the same bind serves the panel SPA
+      # Admin panel API + SPA (docs/opn-panel-roadmap.md). Enabled by
+      # ADMIN_JWT_SECRET alone (unset/empty → admin surface disabled); the login
+      # password is NOT env — the operator sets it on first launch via the panel
+      # (stored in the DB). When enabled, the same bind serves the panel SPA
       # (ADMIN_PANEL_DIR is baked into the image at /srv/panel by ../Dockerfile —
       # no config here). 0.0.0.0 INSIDE the container is required for the
       # host-loopback port publish below; the host-side bind stays 127.0.0.1
       # (ports entry), so it is reachable only via SSH tunnel/WireGuard.
       ADMIN_BIND: 0.0.0.0:9091
-      ADMIN_PASSWORD_HASH: ${OPN_ADMIN_PASSWORD_HASH:-}
       ADMIN_JWT_SECRET: ${OPN_ADMIN_JWT_SECRET:-}
     ports:
       # Admin API: host loopback ONLY (docs/runbooks/panel-admin.md). Never a

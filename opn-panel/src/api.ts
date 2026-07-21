@@ -97,6 +97,12 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
 }
 
 export const api = {
+  // Unauthed. `configured: false` on a fresh deploy → show the one-time setup
+  // screen; `true` → show login. See Core admin.rs status/setup.
+  status: () => call<{ configured: boolean }>("GET", "/status"),
+  // First-launch only: sets the admin password and returns a JWT (auto-login).
+  // 409s once a password exists.
+  setup: (password: string) => call<LoginResp>("POST", "/setup", { password }),
   login: (password: string) => call<LoginResp>("POST", "/login", { password }),
   tenants: () => call<Tenant[]>("GET", "/tenants"),
   createTenant: (name: string) => call<CreatedTenant>("POST", "/tenants", { name }),

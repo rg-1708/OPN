@@ -107,7 +107,6 @@ async fn main() {
                 .expect("connect admin owner pool");
             let admin_state = opn_core::http::admin::AdminState {
                 pg: admin_pg,
-                password_hash: Arc::new(admin_cfg.password_hash.clone()),
                 jwt_secret: Arc::new(admin_cfg.jwt_secret.clone()),
                 login_limits: Arc::new(opn_core::infra::ratelimit::RateLimitTable::default()),
             };
@@ -139,7 +138,7 @@ async fn main() {
             });
         }
         None => tracing::info!(
-            "admin router disabled: set ADMIN_PASSWORD_HASH and ADMIN_JWT_SECRET to enable"
+            "admin router disabled: set ADMIN_JWT_SECRET to enable (password is set on first launch via the panel)"
         ),
     }
 

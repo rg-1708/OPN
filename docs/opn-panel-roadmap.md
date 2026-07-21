@@ -48,18 +48,29 @@ not Core's.
 
 ### Admin authentication (v1)
 
-Single admin principal. `ADMIN_PASSWORD_HASH` (argon2id) in Core's env —
-same hashing dependency Core already uses. Login endpoint verifies the
-password and mints a short-lived admin JWT (existing jsonwebtoken plumbing,
-separate signing key `ADMIN_JWT_SECRET`, TTL 30 min) which the SPA holds in
-memory and sends as `Authorization: Bearer`. Rate-limited login, constant
-failure timing, all admin mutations audit-logged. No multi-admin, no roles,
-no TOTP in v1 — the bind is private and there is one operator. Gated below.
+Single admin principal. The admin surface is enabled by `ADMIN_JWT_SECRET`
+alone (base64, safe in env). The **password is set on first launch through the
+panel**, not env, and stored argon2id-hashed in the DB (`admin_credential`,
+migration 0016). This supersedes the original `ADMIN_PASSWORD_HASH`-in-env
+design: an argon2 PHC string is `$`-delimited, so compose/`.env` interpolation
+shredded it and every login failed — the env path was a footgun the operator
+could not get right. Setup (`POST /admin/v1/setup`) is **one-shot**: once a
+credential row exists it 409s, so the first setter owns the panel and everyone
+after needs that password. It is unauthed but safe because the bind is private
+(loopback/tunnel) — the same trust boundary env assumed. Login verifies against
+the stored hash and mints a short-lived admin JWT (existing jsonwebtoken
+plumbing, separate signing key `ADMIN_JWT_SECRET`, TTL 30 min) which the SPA
+holds in memory and sends as `Authorization: Bearer`. Rate-limited login +
+setup, constant failure timing, all admin mutations audit-logged. No
+multi-admin, no roles, no TOTP in v1 — the bind is private and there is one
+operator. Gated below.
 
 ### Admin API surface (v1)
 
 | Endpoint | Action |
 |---|---|
+| `GET /admin/v1/status` | unauthed — `{configured}`: is a password set yet (setup vs login screen) |
+| `POST /admin/v1/setup` | unauthed, one-shot — set the first-launch password → admin JWT (auto-login) |
 | `POST /admin/v1/login` | password → admin JWT |
 | `GET /admin/v1/tenants` | list: name, created, frozen, key fingerprint, last session |
 | `POST /admin/v1/tenants` | create tenant → **raw API key in response, shown once** |

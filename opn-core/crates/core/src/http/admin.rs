@@ -30,13 +30,14 @@ use contracts::ErrCode;
 pub struct AdminState {
     /// Owner-role pool (`OPN_MIGRATE_DATABASE_URL`) — bypasses RLS.
     pub pg: PgPool,
-    pub password_hash: Arc<String>,
     pub jwt_secret: Arc<String>,
     pub login_limits: Arc<RateLimitTable>,
 }
 
 pub fn admin_router(state: AdminState) -> Router {
     Router::new()
+        .route("/admin/v1/status", get(status))
+        .route("/admin/v1/setup", post(setup))
         .route("/admin/v1/login", post(login))
         .route("/admin/v1/tenants", get(tenants).post(create_tenant))
         .route("/admin/v1/tenants/{id}/rotate-key", post(rotate_key))
@@ -101,6 +102,95 @@ struct LoginResp {
     expires_at: u64,
 }
 
+/// Minimum admin password length, enforced at setup. The bind is private and
+/// login is rate-limited, so this is a footgun guard (no "a" as the password),
+/// not a defence against online brute force.
+const MIN_PASSWORD_LEN: usize = 12;
+
+#[derive(Serialize)]
+struct StatusResp {
+    /// `false` on a fresh deploy (no credential row) → the panel shows the
+    /// one-time setup screen; `true` → it shows the login screen.
+    configured: bool,
+}
+
+/// `GET /admin/v1/status` — unauthed. Whether the admin password has been set,
+/// so the panel picks setup vs login on load. Reveals nothing sensitive: the
+/// setup endpoint is one-shot regardless of who calls it.
+async fn status(State(state): State<AdminState>) -> Response {
+    match sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM admin_credential)")
+        .fetch_one(&state.pg)
+        .await
+    {
+        Ok(configured) => Json(StatusResp { configured }).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "admin status query failed");
+            err_response(ErrCode::Internal, "internal")
+        }
+    }
+}
+
+/// `POST /admin/v1/setup` — unauthed, ONE-SHOT. Sets the admin password on first
+/// launch and logs the operator straight in. Once a credential row exists it
+/// always 409s, so it can never overwrite an established password — the first
+/// setter owns the panel; everyone after needs that password. Safe unauthed only
+/// because the bind is private (loopback/tunnel): whoever can reach it can
+/// already exec on the host, the same trust boundary the env approach assumed.
+async fn setup(State(state): State<AdminState>, Json(body): Json<LoginReq>) -> Response {
+    if state
+        .login_limits
+        .check(LOGIN_KEY, Class::Expensive)
+        .is_err()
+    {
+        return err_response(ErrCode::RateLimited, "too many attempts");
+    }
+    if body.password.chars().count() < MIN_PASSWORD_LEN {
+        return err_response(ErrCode::Invalid, "password must be at least 12 characters");
+    }
+    let hash = match crate::admin::hash_admin_password(&body.password) {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::error!(error = %e, "hash admin password failed");
+            return err_response(ErrCode::Internal, "internal");
+        }
+    };
+    // Singleton insert. ON CONFLICT DO NOTHING → 0 rows means the password was
+    // already set (a concurrent setup won the race, or this is a re-POST).
+    match sqlx::query(
+        "INSERT INTO admin_credential (id, password_hash) VALUES (true, $1) \
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(&hash)
+    .execute(&state.pg)
+    .await
+    {
+        Ok(r) if r.rows_affected() == 1 => {}
+        Ok(_) => return err_response(ErrCode::Conflict, "admin password already set"),
+        Err(e) => {
+            tracing::error!(error = %e, "insert admin credential failed");
+            return err_response(ErrCode::Internal, "internal");
+        }
+    }
+    // Audit the setup (NULL target — not a tenant action). Best-effort: the
+    // password is already committed, so a lost audit row must not fail the
+    // request (unlike tenant mutations, the row's own existence is the record).
+    if let Err(e) =
+        sqlx::query("INSERT INTO admin_audit (action, target_tenant, detail) VALUES ('admin_setup', NULL, NULL)")
+            .execute(&state.pg)
+            .await
+    {
+        tracing::error!(error = %e, "audit admin_setup failed");
+    }
+
+    match mint_admin_jwt(&state.jwt_secret) {
+        Ok((token, expires_at)) => Json(LoginResp { token, expires_at }).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "admin jwt mint failed");
+            err_response(ErrCode::Internal, "internal")
+        }
+    }
+}
+
 /// `POST /admin/v1/login` — password → admin JWT.
 ///
 /// A token is consumed up front so brute-force attempts are throttled *before*
@@ -117,7 +207,24 @@ async fn login(State(state): State<AdminState>, Json(body): Json<LoginReq>) -> R
         return err_response(ErrCode::RateLimited, "too many attempts");
     }
 
-    if !verify_password(&state.password_hash, &body.password) {
+    // Password hash lives in the DB (set on first launch, migration 0016). No row
+    // yet → not configured; reject uniformly (the panel's status call routes such
+    // a deploy to the setup screen, so login is only hit once a hash exists).
+    let stored: Option<String> =
+        match sqlx::query_scalar("SELECT password_hash FROM admin_credential LIMIT 1")
+            .fetch_optional(&state.pg)
+            .await
+        {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::error!(error = %e, "load admin credential failed");
+                return err_response(ErrCode::Internal, "internal");
+            }
+        };
+    let Some(hash) = stored else {
+        return err_response(ErrCode::Unauthorized, "invalid credentials");
+    };
+    if !verify_password(&hash, &body.password) {
         return err_response(ErrCode::Unauthorized, "invalid credentials");
     }
 
@@ -135,7 +242,7 @@ async fn login(State(state): State<AdminState>, Json(body): Json<LoginReq>) -> R
 fn verify_password(phc: &str, password: &str) -> bool {
     use argon2::password_hash::{PasswordHash, PasswordVerifier};
     let Ok(parsed) = PasswordHash::new(phc) else {
-        tracing::error!("ADMIN_PASSWORD_HASH is not a valid argon2 PHC string");
+        tracing::error!("stored admin password hash is not a valid argon2 PHC string");
         return false;
     };
     argon2::Argon2::default()
@@ -371,9 +478,11 @@ async fn load_stats(pg: &PgPool) -> Result<Stats, sqlx::Error> {
         )
         .fetch_one(pg)
         .await?,
-        active_calls: sqlx::query_scalar("SELECT count(*) FROM call_sessions WHERE state = 'active'")
-            .fetch_one(pg)
-            .await?,
+        active_calls: sqlx::query_scalar(
+            "SELECT count(*) FROM call_sessions WHERE state = 'active'",
+        )
+        .fetch_one(pg)
+        .await?,
         // 24h count prunes to recent partitions of the RANGE-partitioned
         // `messages` table by `created_at`.
         messages_24h: sqlx::query_scalar(
@@ -541,7 +650,10 @@ mod tests {
             api_key: raw.clone(),
         };
         let body = serde_json::to_string(&resp).expect("serialize resp");
-        assert!(body.contains(&raw), "response body must carry the raw key once");
+        assert!(
+            body.contains(&raw),
+            "response body must carry the raw key once"
+        );
 
         // The exact detail the create handler audits.
         let detail = serde_json::json!({ "name": "acme", "fingerprint": fp });

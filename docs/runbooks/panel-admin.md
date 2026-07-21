@@ -5,13 +5,19 @@
 The admin API (opn-panel-roadmap.md Sprints P0–P1) is a third axum router on
 its own bind — login, tenant list/stats/audit, and the tenant lifecycle
 mutations (create / rotate-key / freeze / unfreeze), every mutation writing an
-`admin_audit` row. It is **feature-off by default**: unless BOTH
-`ADMIN_PASSWORD_HASH` and `ADMIN_JWT_SECRET` are set and non-empty
-([config.rs](../../opn-core/crates/core/src/config.rs), empty counts as
-absent), the router never starts and the deploy behaves exactly as before.
-Auth is argon2id password → 30-min admin JWT (separate secret and claim shape
-from tenant JWTs — neither verifies as the other). Login is rate-limited by a
-single global bucket (fine for one operator on a private bind).
+`admin_audit` row. It is **feature-off by default**: unless `ADMIN_JWT_SECRET`
+is set and non-empty ([config.rs](../../opn-core/crates/core/src/config.rs),
+empty counts as absent), the router never starts and the deploy behaves exactly
+as before. Auth is argon2id password → 30-min admin JWT (separate secret and
+claim shape from tenant JWTs — neither verifies as the other). Login is
+rate-limited by a single global bucket (fine for one operator on a private bind).
+
+The password is **set on first launch through the panel**, not env, and stored
+in the DB (`admin_credential`, migration 0016). The old `ADMIN_PASSWORD_HASH`
+env var is gone: an argon2 PHC string is `$`-delimited, so compose/`.env`
+interpolation shredded it and every login failed with *"not a valid argon2 PHC
+string"*. `POST /admin/v1/setup` is **one-shot** — once the password exists it
+409s, so the first setter owns the panel and everyone after needs that password.
 
 In prod compose the container binds `0.0.0.0:9091` but the host publish is
 `127.0.0.1:9091:9091` — **loopback only, no Traefik router, no TLS**. The SSH
@@ -19,21 +25,15 @@ tunnel is the front door and the transport security.
 
 ## Enable (one-time)
 
-1. Generate the password hash (reads stdin — never puts the password in argv
-   or shell history):
-   ```bash
-   # Coolify runs the stack from its own dir, so target the container directly
-   # (-i: the command reads the password from stdin):
-   docker ps --format '{{.Names}}' | grep -i core
-   docker exec -i <container-name> opn-core admin hash-password
-   # or locally: cargo run -p opn-core -- admin hash-password
-   # type the password, press Enter, Ctrl-D
-   ```
-2. In Coolify's secret store set:
-   - `OPN_ADMIN_PASSWORD_HASH` — the PHC string from step 1 (quote it; it
-     contains `$`)
-   - `OPN_ADMIN_JWT_SECRET` — `openssl rand -base64 48`
-3. Redeploy. Startup log line confirms `admin api enabled` on 9091.
+1. In Coolify's secret store set **one** var:
+   - `OPN_ADMIN_JWT_SECRET` — `openssl rand -base64 48` (base64 has no `$`, so
+     no interpolation trap; keep it secret — it signs admin JWTs)
+2. Redeploy. Startup log confirms `admin panel SPA served off admin bind` and
+   `admin router up` on 9091.
+3. Open the tunnel + browse to the panel (see **Use**). First launch shows a
+   **Set operator password** screen — choose a password (≥ 12 chars); it is
+   hashed (argon2id) and stored in the DB, and you are logged straight in. From
+   then on the panel shows the normal login.
 
 ## Use
 
@@ -64,9 +64,18 @@ it is not recoverable (only the sha256 hash is stored).
 
 ## Lost admin password
 
-Not recoverable (argon2). Re-run step 1 with a new password, update
-`OPN_ADMIN_PASSWORD_HASH`, redeploy. No data is affected; existing admin JWTs
-die at their 30-min expiry (or bounce the container to kill them now).
+Not recoverable (argon2). Clear the stored credential so the panel returns to
+its first-launch setup screen, then set a new password in the browser:
+
+```bash
+docker exec <core-container> \
+  psql "$OPN_MIGRATE_DATABASE_URL" -c 'DELETE FROM admin_credential;'
+# reload the panel → "Set operator password" again
+```
+
+No other data is affected. Existing admin JWTs die at their 30-min expiry (or
+bounce the container to kill them now). Whoever reaches the bind first after the
+delete sets the new password — fine, the bind is operator-only.
 
 ## Panel down / admin bind dead
 
