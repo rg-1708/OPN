@@ -47,7 +47,7 @@ Three consequences worth internalizing:
 ## 2. Getting started
 
 ```bash
-npm install        # pulls @opn/contracts from ../opn-core (file dependency)
+npm install        # @opn/contracts is vendored in ./vendor/contracts, no other repo needed
 npm test           # wire-layer unit tests
 npm run example    # vanilla demo, see example/main.ts for token wiring
 ```

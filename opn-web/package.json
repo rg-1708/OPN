@@ -16,7 +16,7 @@
     "example": "vite example"
   },
   "dependencies": {
-    "@opn/contracts": "file:../opn-core/crates/contracts"
+    "@opn/contracts": "file:./vendor/contracts"
   },
   "devDependencies": {
     "typescript": "^5.7.2",

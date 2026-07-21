@@ -1,0 +1,9 @@
+{
+  "name": "@opn/contracts",
+  "version": "0.1.0",
+  "description": "TypeScript type bindings for the OPN-CORE wire protocol (generated from the Rust `contracts` crate). Vendored snapshot — regenerate from opn-core on contracts bump.",
+  "license": "UNLICENSED",
+  "files": [
+    "bindings"
+  ]
+}
