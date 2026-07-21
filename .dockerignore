@@ -1,0 +1,27 @@
+# Build context is the REPO ROOT (opn-core/docker-compose.prod.yml sets
+# `context: ..`) so the image can build both the Rust binary (opn-core/) and the
+# panel SPA (opn-panel/). Keep the context lean and the build reproducible: never
+# ship build output, caches, local artifacts, logs, or unrelated trees.
+.git/
+.github/
+archive/
+docs/
+
+# Rust build output + local perf/fuzz artifacts (opn-core/.dockerignore rules,
+# re-homed to the root context).
+opn-core/target/
+opn-core/perf/results/
+opn-core/fuzz/target/
+opn-core/fuzz/corpus/
+# Deploy/ops scripts (backup, prometheus, initdb) are mounted at runtime via
+# compose or run on the host — never COPYed into the image.
+opn-core/deploy/
+
+# Panel: install/build output is produced inside the image, never copied in.
+opn-panel/node_modules/
+opn-panel/dist/
+opn-panel/test-results/
+opn-panel/playwright-report/
+
+**/node_modules/
+**/*.log

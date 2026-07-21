@@ -19,8 +19,11 @@
 services:
   core:
     build:
-      context: .
-      dockerfile: Dockerfile
+      # Context is the repo root (one dir up) so the image can build the panel
+      # SPA (../opn-panel) alongside the Rust binary — see ../Dockerfile. The
+      # root .dockerignore keeps target/, node_modules/, archive/, and .git out.
+      context: ..
+      dockerfile: opn-core/Dockerfile
     restart: unless-stopped
     depends_on:
       postgres:
@@ -64,8 +67,10 @@ services:
       LIVEKIT_URL: ${OPN_LIVEKIT_URL:-}
       LIVEKIT_API_KEY: ${OPN_LIVEKIT_API_KEY:-}
       LIVEKIT_API_SECRET: ${OPN_LIVEKIT_API_SECRET:-}
-      # Admin panel API (docs/opn-panel-roadmap.md). Both unset/empty → admin
-      # surface disabled. 0.0.0.0 INSIDE the container is required for the
+      # Admin panel API + SPA (docs/opn-panel-roadmap.md). Both unset/empty →
+      # admin surface disabled. When enabled, the same bind serves the panel SPA
+      # (ADMIN_PANEL_DIR is baked into the image at /srv/panel by ../Dockerfile —
+      # no config here). 0.0.0.0 INSIDE the container is required for the
       # host-loopback port publish below; the host-side bind stays 127.0.0.1
       # (ports entry), so it is reachable only via SSH tunnel/WireGuard.
       ADMIN_BIND: 0.0.0.0:9091

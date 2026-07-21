@@ -18,6 +18,11 @@ pub struct AdminConfig {
     /// Signing key for admin JWTs — SEPARATE from `jwt_secret` so an admin
     /// token and a tenant session token can never verify as each other.
     pub jwt_secret: String,
+    /// Built panel SPA to serve as static files off the admin bind (P2). `None`
+    /// in dev — Vite serves the SPA and proxies `/admin` to this bind. `Some` in
+    /// prod (`ADMIN_PANEL_DIR` = the `dist/` dir); the API keeps `/admin/v1/*`
+    /// and everything else falls back to the SPA (index.html).
+    pub panel_dir: Option<std::path::PathBuf>,
 }
 
 /// LiveKit SFU config (opn-group-calls.md G1). `Some` only when the three
@@ -155,6 +160,7 @@ impl Config {
                     bind: admin_bind,
                     password_hash,
                     jwt_secret,
+                    panel_dir: nonempty("ADMIN_PANEL_DIR").map(std::path::PathBuf::from),
                 })
             }
             _ => None,

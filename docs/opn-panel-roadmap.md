@@ -4,9 +4,13 @@ Companion to [OPN-CORE.md](OPN-CORE.md). Same reading rules: sprints
 scope-bound, each has Goal / Depends on / Work items / Test plan / Exit
 criteria; Core-side changes go through a CDR first.
 
-**Status (2026-07-21): P0 and P1 shipped** (admin bind, login, read
-endpoints, audit table, full tenant/key mutations). P2 (panel SPA) and P3
-(ops polish) remain.
+**Status (2026-07-21): P0–P3 shipped.** Admin bind, login, read endpoints,
+audit table, and full tenant/key mutations (P0–P1); the Vite/React panel SPA
+served off the admin bind with login, tenant table, show-once key modal,
+rotate/freeze flows, stats tiles, and audit view (P2); prod wiring — panel
+built in the Dockerfile and baked at `/srv/panel`, compose builds from the repo
+root, runbook covers browser + CLI access (P3). Playwright smoke
+(`opn-panel/tests/smoke.spec.ts`) runs against a live dev stack.
 
 ## Why this doc exists — and the anti-goal it overrides
 
@@ -86,8 +90,8 @@ immediate-cut v1; grace-period dual-key is gated.
 |---|---|---|---|
 | P0 | Admin API read-only + auth | — | **done** — admin bind, login, list/stats endpoints, audit table |
 | P1 | Mutations | P0 | **done** — create / rotate-key / freeze / unfreeze, audit rows |
-| P2 | Panel SPA | P1 | login page, tenant table, create/rotate flows with show-once key modal, stats header |
-| P3 | Ops polish | P2 | deploy wiring, runbook, prod compose entry |
+| P2 | Panel SPA | P1 | **done** — login page, tenant table, create/rotate flows with show-once key modal, stats header, audit view, static build served by admin bind |
+| P3 | Ops polish | P2 | **done** — panel build step in Dockerfile, prod compose entry (admin bind loopback + panel baked), runbook (tunnel + browser/CLI access) |
 
 ## Sprint P2 — Panel SPA
 

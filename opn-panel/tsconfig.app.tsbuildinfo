@@ -1,0 +1,1 @@
+{"root":["./src/App.tsx","./src/api.ts","./src/format.ts","./src/main.tsx","./src/ui.tsx","./src/vite-env.d.ts","./src/components/AuditLog.tsx","./src/components/CreateTenantModal.tsx","./src/components/ShowOnceKeyModal.tsx","./src/components/StatsHeader.tsx","./src/components/TenantTable.tsx","./src/views/Dashboard.tsx","./src/views/Login.tsx"],"version":"5.9.3"}

@@ -1,0 +1,29 @@
+{
+  "name": "opn-panel",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "OPN admin panel (opn-panel-roadmap.md P2) — operator dashboard for tenants and API keys. Talks to Core's private admin bind.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -b --noEmit",
+    "smoke": "playwright test"
+  },
+  "dependencies": {
+    "react": "^19",
+    "react-dom": "^19"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49",
+    "@tailwindcss/vite": "^4",
+    "@types/node": "^22",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@vitejs/plugin-react": "^4",
+    "tailwindcss": "^4",
+    "typescript": "^5.7",
+    "vite": "^6"
+  }
+}

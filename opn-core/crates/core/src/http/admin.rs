@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{any, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -44,7 +44,17 @@ pub fn admin_router(state: AdminState) -> Router {
         .route("/admin/v1/tenants/{id}/unfreeze", post(unfreeze))
         .route("/admin/v1/stats", get(stats))
         .route("/admin/v1/audit", get(audit))
+        // Any other `/admin/v1/*` path (typo, trailing slash, a removed route)
+        // gets a JSON 404 — NOT the SPA index.html the outer static fallback
+        // serves. Keeps the API namespace answering JSON with the right status,
+        // so a stray `/admin/v1/tenants/` never returns a 200 HTML shell.
+        .route("/admin/v1/{*rest}", any(api_not_found))
         .with_state(state)
+}
+
+/// Catch-all for unmatched `/admin/v1/*` paths: a uniform JSON 404.
+async fn api_not_found() -> Response {
+    err_response(ErrCode::NotFound, "not found")
 }
 
 /// Marker for a request bearing a valid admin JWT. Constructed only by the
@@ -486,6 +496,25 @@ mod tests {
         assert_ne!(a, b, "keys must not repeat");
         // "opn_" + 43 chars (32 bytes url-safe base64, no pad).
         assert_eq!(a.len(), 47);
+    }
+
+    // The `/admin/v1/{*rest}` catch-all must coexist with the static routes —
+    // axum inserts into matchit eagerly, so an overlap panics at construction.
+    // Mirror the exact path shapes (stateless handlers) to prove it doesn't.
+    #[test]
+    fn catchall_coexists_with_static_admin_routes() {
+        async fn noop() -> &'static str {
+            ""
+        }
+        let _r: Router = Router::new()
+            .route("/admin/v1/login", post(noop))
+            .route("/admin/v1/tenants", get(noop).post(noop))
+            .route("/admin/v1/tenants/{id}/rotate-key", post(noop))
+            .route("/admin/v1/tenants/{id}/freeze", post(noop))
+            .route("/admin/v1/tenants/{id}/unfreeze", post(noop))
+            .route("/admin/v1/stats", get(noop))
+            .route("/admin/v1/audit", get(noop))
+            .route("/admin/v1/{*rest}", any(noop));
     }
 
     #[test]

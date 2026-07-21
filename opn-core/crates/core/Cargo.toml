@@ -28,6 +28,7 @@ smallvec = "1"
 time = { version = "0.3", features = ["formatting", "parsing"] }
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "time", "migrate", "json", "macros"] }
 tokio = { version = "1.53.0", features = ["rt-multi-thread", "macros", "signal", "net", "time"] }
+tower-http = { version = "0.6", features = ["fs"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 uuid.workspace = true

@@ -1,0 +1,16 @@
+@import "tailwindcss";
+
+/* Single deliberate dark theme — internal single-operator ops tool. */
+:root {
+  color-scheme: dark;
+}
+
+body {
+  @apply bg-zinc-950 text-zinc-100 antialiased;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+/* Monospace for keys, fingerprints, ids. */
+.mono {
+  font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+}

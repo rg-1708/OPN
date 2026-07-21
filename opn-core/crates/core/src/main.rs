@@ -111,14 +111,27 @@ async fn main() {
                 jwt_secret: Arc::new(admin_cfg.jwt_secret.clone()),
                 login_limits: Arc::new(opn_core::infra::ratelimit::RateLimitTable::default()),
             };
+            // P2: serve the built panel SPA off the same bind when configured, so
+            // the operator gets one private origin (no CORS, no extra web server).
+            // `/admin/v1/*` stays the API; every other path falls back to the SPA
+            // (index.html). Unset (dev) → API-only; Vite serves the SPA and proxies.
+            let mut admin_app = http::admin::admin_router(admin_state);
+            if let Some(dir) = admin_cfg.panel_dir.as_ref() {
+                if !dir.is_dir() {
+                    tracing::warn!(dir = %dir.display(), "ADMIN_PANEL_DIR is not a directory; panel will 404");
+                }
+                let index = dir.join("index.html");
+                admin_app = admin_app.fallback_service(
+                    tower_http::services::ServeDir::new(dir)
+                        .not_found_service(tower_http::services::ServeFile::new(index)),
+                );
+                tracing::info!(dir = %dir.display(), "admin panel SPA served off admin bind");
+            }
             let admin_listener = tokio::net::TcpListener::bind(admin_cfg.bind)
                 .await
                 .expect("bind ADMIN_BIND");
             tracing::info!(bind = %admin_cfg.bind, "opn-core admin router up");
-            let server = axum::serve(
-                admin_listener,
-                http::admin::admin_router(admin_state).into_make_service(),
-            );
+            let server = axum::serve(admin_listener, admin_app.into_make_service());
             tokio::spawn(async move {
                 if let Err(e) = server.await {
                     tracing::error!(error = %e, "admin server exited");

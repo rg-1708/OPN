@@ -37,16 +37,30 @@ tunnel is the front door and the transport security.
 
 ## Use
 
+Open the SSH tunnel first — it is the only door to the bind:
+
 ```bash
 ssh -L 9091:127.0.0.1:9091 <prod-host>
+```
+
+**Panel (normal path):** browse to <http://localhost:9091/>. The admin bind
+serves the built SPA (baked into the image at `/srv/panel`, P3) off the same
+origin as the API, so the login page → tenant table → create/rotate/freeze all
+work in the browser with no CORS. Log in with the admin password; the JWT lives
+in browser memory only, so a reload lands back on the login page (by design —
+no secret at rest).
+
+**API (scripting / panel-down):** the same endpoints answer JSON directly:
+
+```bash
 curl -s -X POST localhost:9091/admin/v1/login -d '{"password":"…"}' \
   -H 'content-type: application/json'          # -> {token, expires_at}
 curl -s localhost:9091/admin/v1/tenants -H "Authorization: Bearer <token>"
 ```
 
-Raw API keys appear exactly once, in the create/rotate response body. If the
-operator loses one, rotate — it is not recoverable (only the sha256 hash is
-stored).
+Raw API keys appear exactly once, in the create/rotate response body (browser:
+the show-once modal; curl: the response). If the operator loses one, rotate —
+it is not recoverable (only the sha256 hash is stored).
 
 ## Lost admin password
 
