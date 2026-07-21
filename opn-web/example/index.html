@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>OPN client example</title>
+    <style>
+      body { font: 14px/1.4 monospace; margin: 2rem auto; max-width: 52rem; }
+      #log { white-space: pre-wrap; background: #111; color: #ddd; padding: 1rem; min-height: 12rem; }
+      li { cursor: pointer; }
+      li.active { font-weight: bold; }
+      input { width: 24rem; }
+    </style>
+  </head>
+  <body>
+    <h1>OPN client example</h1>
+    <p id="status">disconnected</p>
+    <ul id="channels"></ul>
+    <form id="send" hidden>
+      <input id="text" placeholder="message" autocomplete="off" />
+      <button>send</button>
+    </form>
+    <div id="log"></div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

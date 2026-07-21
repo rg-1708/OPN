@@ -1,0 +1,26 @@
+{
+  "name": "@opn/client",
+  "version": "0.1.0",
+  "description": "Framework-agnostic web client for OPN Core: one multiplexed WSS connection + HTTPS reads. Bring your own UI.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "check": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "example": "vite example"
+  },
+  "dependencies": {
+    "@opn/contracts": "file:../opn-core/crates/contracts"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2",
+    "vite": "^6.0.0",
+    "vitest": "^3.0.0"
+  }
+}
