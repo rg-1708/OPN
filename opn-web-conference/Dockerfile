@@ -16,9 +16,12 @@ FROM node:22-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production PORT=8080 WEB_ROOT=/app/app/dist
 # Only the built assets + the stdlib-only servers. No node_modules.
+# The whole dev-auth dir ships (not hand-picked files): deploy/server.mjs pulls in
+# join.mjs → rooms.mjs → bot.mjs, and enumerating them rots the moment a new
+# dev-auth module is imported. All stdlib-only, so the dir is tiny.
 COPY --from=build /src/app/dist ./app/dist
 COPY deploy/server.mjs ./deploy/server.mjs
-COPY dev-auth/join.mjs ./dev-auth/join.mjs
+COPY dev-auth ./dev-auth
 USER node
 EXPOSE 8080
 # Rollout gate — Coolify/Traefik hold traffic until this passes. Node 22 has fetch.
