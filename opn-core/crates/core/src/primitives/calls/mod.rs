@@ -9,11 +9,12 @@
 //! handlers here are where those link emits hook in.
 
 pub mod fsm;
+pub mod group;
 pub mod store;
 
 use contracts::{
     ActiveCall, CallKind, CallParticipantState, CallSessionState, ErrCode, Evt, NotifyClass,
-    VoiceAction,
+    Topology, VoiceAction,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -34,12 +35,25 @@ const SIGNAL_MAX_BYTES: usize = 16 * 1024;
 /// (handlers here and the janitor reap). `ice_servers` is the static WebRTC ICE
 /// config echoed into every snapshot (§5).
 pub fn snapshot_evt(snap: &CallSnapshot, ice_servers: &serde_json::Value) -> Evt {
-    Evt::CallsState {
-        call_id: snap.call_id,
-        kind: snap.kind,
-        state: snap.state,
-        participants: snap.participants.clone(),
-        ice_servers: ice_servers.clone(),
+    // Topology picks the wire event: a group call gets `calls.group.state` (no
+    // kind/ice — media rides the SFU), a 1:1 call gets `calls.state`. Both flow
+    // through this one builder so every emit path (handlers + janitor) stays in
+    // lockstep.
+    match snap.topology {
+        Topology::Sfu => Evt::CallsGroupState {
+            call_id: snap.call_id,
+            state: snap.state,
+            participants: snap.participants.clone(),
+            topology: Topology::Sfu,
+        },
+        Topology::P2p => Evt::CallsState {
+            call_id: snap.call_id,
+            kind: snap.kind,
+            state: snap.state,
+            participants: snap.participants.clone(),
+            ice_servers: ice_servers.clone(),
+            topology: Topology::P2p,
+        },
     }
 }
 
@@ -62,6 +76,11 @@ pub async fn publish_snapshot(state: &AppState, world: Uuid, snap: &CallSnapshot
 /// call has no targets yet. Best-effort local send — a disconnected link drops
 /// it and re-syncs on reconnect via `/calls/active`.
 fn emit_voice(state: &AppState, world: Uuid, snap: &CallSnapshot) {
+    // Group (SFU) calls carry no game-voice targets — media flows through the
+    // LiveKit sidecar, not the tenant voice link. Only 1:1 (p2p) calls drive it.
+    if snap.topology == Topology::Sfu {
+        return;
+    }
     let (action, characters) = match snap.state {
         CallSessionState::Active => (VoiceAction::SetTargets, joined_characters(snap)),
         CallSessionState::Ended => (VoiceAction::Clear, Vec::new()),

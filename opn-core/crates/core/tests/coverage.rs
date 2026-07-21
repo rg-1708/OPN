@@ -87,6 +87,13 @@ fn every_cmd_names_its_covering_test() {
             Cmd::FeedUnfollow { .. } => "feed::follow_unfollow_and_authz",
             Cmd::NotifySeen { .. } => "notify::seen_marks_rows",
             Cmd::NotifyClear => "notify::clear_empties_inbox",
+            Cmd::CallsGroupCreate { .. } => "group_calls::create_join_leave_lifecycle",
+            Cmd::CallsGroupJoin { .. } => {
+                "group_calls::create_join_leave_lifecycle, group_calls::join_full_room_conflicts, \
+                 group_calls::join_ended_room_conflicts"
+            }
+            Cmd::CallsGroupLeave { .. } => "group_calls::create_join_leave_lifecycle",
+            Cmd::CallsGroupEnd { .. } => "group_calls::end_is_creator_only",
         }
     }
     let _ = covering_test;
@@ -109,6 +116,10 @@ fn every_evt_names_its_covering_test() {
             Evt::CallsSignal { .. } => "calls::signal_relay_and_authz",
             Evt::CallsVoice { .. } => {
                 "link::set_targets_on_accept_and_clear_on_hangup, link::reap_emits_clear"
+            }
+            Evt::CallsGroupState { .. } => {
+                "group_calls::create_join_leave_lifecycle, \
+                 group_calls::webhook_participant_left_syncs_and_ends"
             }
             Evt::FeedActivity { .. } => {
                 "feed::like_and_comment_advise_feed (post/like/comment kinds), \

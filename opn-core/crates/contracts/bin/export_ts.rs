@@ -32,6 +32,10 @@ fn main() {
     // row — neither rides the Cmd/Evt graph (VoiceAction does, via calls.voice).
     contracts::LinkHello::export_all_to(dir).expect("export LinkHello");
     contracts::ActiveCall::export_all_to(dir).expect("export ActiveCall");
+    // group calls (opn-group-calls.md G0): the join ack rides the ack as an
+    // opaque value, so export it explicitly (Topology is already reachable via
+    // Evt::CallsState / Evt::CallsGroupState).
+    contracts::GroupJoinAck::export_all_to(dir).expect("export GroupJoinAck");
     // ledger (§10.5): the history row rides HTTP, not the Cmd/Evt graph.
     contracts::TransferItem::export_all_to(dir).expect("export TransferItem");
     // feed (§10.3): the read-surface rows ride HTTP, not the Cmd/Evt graph

@@ -2,7 +2,7 @@
 //! shapes are literal strings here, not re-derived. Compared as
 //! `serde_json::Value` so key order is irrelevant but content is exact.
 
-use contracts::types::{MediaKind, MessageBody};
+use contracts::types::{MediaKind, MessageBody, Topology};
 use contracts::{cmd::SettingsScope, ClientFrame, Cmd, ErrBody, ErrCode, Evt, ServerMsg};
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -497,6 +497,7 @@ fn push_calls_state() {
                 },
             ],
             ice_servers: json!([]),
+            topology: Topology::default(),
         },
     };
     assert_eq!(
@@ -512,8 +513,118 @@ fn push_calls_state() {
                     {"character_id": "0198c5b6-0000-7000-8000-000000000042", "state": "joined"},
                     {"character_id": "0198c5b6-0000-7000-8000-000000000043", "state": "ringing"}
                 ],
-                "ice_servers": []
+                "ice_servers": [],
+                "topology": "p2p"
             }
+        })
+    );
+}
+
+/// An old `calls.state` payload (pre-G0, no `topology`) must still deserialize —
+/// the field defaults to `p2p`, so a pinned client that never sent it is safe.
+#[test]
+fn calls_state_topology_defaults_when_absent() {
+    let old = r#"{"topic":"call:x","evt":"calls.state","payload":{"call_id":"0198c5b6-0000-7000-8000-000000000040","kind":"voice","state":"active","participants":[],"ice_servers":[]}}"#;
+    let msg: ServerMsg = serde_json::from_str(old).expect("old payload deserializes");
+    match msg {
+        ServerMsg::Push {
+            evt: Evt::CallsState { topology, .. },
+            ..
+        } => assert_eq!(topology, Topology::P2p),
+        _ => panic!("expected calls.state push"),
+    }
+}
+
+// ── group calls (opn-group-calls.md G0) ──────────────────────────────────────
+
+#[test]
+fn client_frame_calls_group_commands() {
+    roundtrip(
+        &ClientFrame {
+            id: 45,
+            cmd: Cmd::CallsGroupCreate {
+                label: Some("standup".into()),
+                max_participants: Some(16),
+            },
+        },
+        r#"{"id":45,"cmd":"calls.group.create","payload":{"label":"standup","max_participants":16}}"#,
+    );
+    roundtrip(
+        &ClientFrame {
+            id: 46,
+            cmd: Cmd::CallsGroupJoin { call_id: u("40") },
+        },
+        r#"{"id":46,"cmd":"calls.group.join","payload":{"call_id":"0198c5b6-0000-7000-8000-000000000040"}}"#,
+    );
+    roundtrip(
+        &ClientFrame {
+            id: 47,
+            cmd: Cmd::CallsGroupLeave { call_id: u("40") },
+        },
+        r#"{"id":47,"cmd":"calls.group.leave","payload":{"call_id":"0198c5b6-0000-7000-8000-000000000040"}}"#,
+    );
+    roundtrip(
+        &ClientFrame {
+            id: 48,
+            cmd: Cmd::CallsGroupEnd { call_id: u("40") },
+        },
+        r#"{"id":48,"cmd":"calls.group.end","payload":{"call_id":"0198c5b6-0000-7000-8000-000000000040"}}"#,
+    );
+}
+
+#[test]
+fn push_calls_group_state() {
+    use contracts::types::{CallParticipant, CallParticipantState, CallSessionState};
+    let push = ServerMsg::Push {
+        topic: "call:0198c5b6-0000-7000-8000-000000000040".into(),
+        evt: Evt::CallsGroupState {
+            call_id: u("40"),
+            state: CallSessionState::Active,
+            participants: vec![
+                CallParticipant {
+                    character_id: u("42"),
+                    state: CallParticipantState::Joined,
+                },
+                CallParticipant {
+                    character_id: u("43"),
+                    state: CallParticipantState::Left,
+                },
+            ],
+            topology: Topology::Sfu,
+        },
+    };
+    assert_eq!(
+        serde_json::to_value(&push).expect("serialize"),
+        json!({
+            "topic": "call:0198c5b6-0000-7000-8000-000000000040",
+            "evt": "calls.group.state",
+            "payload": {
+                "call_id": "0198c5b6-0000-7000-8000-000000000040",
+                "state": "active",
+                "participants": [
+                    {"character_id": "0198c5b6-0000-7000-8000-000000000042", "state": "joined"},
+                    {"character_id": "0198c5b6-0000-7000-8000-000000000043", "state": "left"}
+                ],
+                "topology": "sfu"
+            }
+        })
+    );
+}
+
+#[test]
+fn group_join_ack_shape() {
+    use contracts::types::GroupJoinAck;
+    let ack = GroupJoinAck {
+        sfu_url: "wss://livekit.example".into(),
+        token: "jwt.room.token".into(),
+        expires_at: "2026-07-21T12:00:60Z".into(),
+    };
+    assert_eq!(
+        serde_json::to_value(&ack).expect("serialize"),
+        json!({
+            "sfu_url": "wss://livekit.example",
+            "token": "jwt.room.token",
+            "expires_at": "2026-07-21T12:00:60Z"
         })
     );
 }

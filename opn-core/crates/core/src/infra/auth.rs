@@ -25,6 +25,20 @@ pub fn api_key_hash(raw_key: &str) -> String {
         .collect()
 }
 
+/// Mint a fresh raw API key: 32 bytes of entropy → `opn_<url-safe-base64>` (43
+/// chars, no padding). The single key-generation point — CLI `create-tenant`,
+/// admin-panel create, and rotate-key all call it, so the entropy/format never
+/// diverges. The raw key is shown once by the caller; only its `api_key_hash`
+/// is stored, so it is unrecoverable after and MUST NOT be logged.
+pub fn generate_api_key() -> String {
+    use base64::Engine;
+    use rand::RngCore;
+    let mut buf = [0u8; 32];
+    rand::rng().fill_bytes(&mut buf);
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf);
+    format!("opn_{b64}")
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
     sid: Uuid,
@@ -60,6 +74,59 @@ pub fn mint_jwt(secret: &str, identity_of: &Identity) -> Result<String> {
         &EncodingKey::from_secret(secret.as_bytes()),
     )
     .context("encode jwt")
+}
+
+/// Admin-panel JWT (opn-panel-roadmap.md Sprint P0). A deliberately DIFFERENT
+/// claim shape from `Claims`: it carries `sub: "admin"` and none of the session
+/// fields. Combined with a separate signing secret (`ADMIN_JWT_SECRET`), an
+/// admin token can never verify as a tenant session — `verify()` above requires
+/// `sid`/`tenant`/`world`, which this token lacks — and a tenant token can
+/// never verify here (missing `sub`, wrong signature).
+#[derive(Debug, Serialize, Deserialize)]
+struct AdminClaims {
+    sub: String,
+    exp: u64,
+}
+
+/// Admin JWT TTL: 30 min (roadmap §Admin authentication). Held in memory by the
+/// SPA; re-login on refresh is acceptable.
+const ADMIN_JWT_TTL_SECS: u64 = 1800;
+
+/// Mint an admin token. Returns `(token, expires_at)` where `expires_at` is the
+/// Unix-epoch second the token expires — the login response echoes it.
+pub fn mint_admin_jwt(secret: &str) -> Result<(String, u64)> {
+    let exp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("system clock before epoch")?
+        .as_secs()
+        + ADMIN_JWT_TTL_SECS;
+    let token = jsonwebtoken::encode(
+        &Header::default(),
+        &AdminClaims {
+            sub: "admin".into(),
+            exp,
+        },
+        &EncodingKey::from_secret(secret.as_bytes()),
+    )
+    .context("encode admin jwt")?;
+    Ok((token, exp))
+}
+
+/// Verify an admin token: signature + `exp` (jsonwebtoken checks both) and the
+/// `sub == "admin"` marker. Stateless — there is no admin session row. Returns
+/// `VerifyError::Unauthorized` for any failure; there is no DB path, so
+/// `Internal` never arises here.
+pub fn verify_admin_jwt(secret: &str, token: &str) -> Result<(), VerifyError> {
+    let data = jsonwebtoken::decode::<AdminClaims>(
+        token,
+        &DecodingKey::from_secret(secret.as_bytes()),
+        &Validation::default(),
+    )
+    .map_err(|_| VerifyError::Unauthorized)?;
+    if data.claims.sub != "admin" {
+        return Err(VerifyError::Unauthorized);
+    }
+    Ok(())
 }
 
 /// The authenticated actor behind a WS connection or JWT HTTP call. The only

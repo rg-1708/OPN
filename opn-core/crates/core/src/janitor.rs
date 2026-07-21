@@ -39,6 +39,7 @@ pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
             run_task("listings_expire", listings_expire(&state.pg)).await;
             run_task("calls_reap", calls_reap(&state)).await;
             run_task("calls_reap_orphaned", calls_reap_orphaned(&state)).await;
+            run_task("calls_group_reap", calls_group_reap(&state)).await;
             run_task("ledger_expire_holds", ledger_expire_holds(&state)).await;
             run_task("ledger_reconcile", ledger_reconcile(&state)).await;
             // In-process, no DB: buckets idle > 10 min go away (§12).
@@ -199,6 +200,34 @@ async fn calls_reap_orphaned(state: &AppState) -> Result<u64> {
             .collect();
         let snaps =
             crate::primitives::calls::store::end_active_orphans(&state.pg, world_id, &dead).await?;
+        for snap in &snaps {
+            crate::primitives::calls::publish_snapshot(state, world_id, snap).await;
+        }
+        total += snaps.len() as u64;
+    }
+    Ok(total)
+}
+
+/// Reaps empty group (SFU) rooms across every world (opn-group-calls.md G1): an
+/// active SFU session older than `empty_room_reap_secs` with zero joined
+/// participants is force-ended and a final `calls.group.state` is published (the
+/// backstop for a room whose last participant vanished without a clean
+/// leave/webhook). No-op when group calls are disabled (`livekit` unset).
+async fn calls_group_reap(state: &AppState) -> Result<u64> {
+    let Some(lk) = state.cfg.livekit.as_ref() else {
+        return Ok(0);
+    };
+    let world_ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM worlds")
+        .fetch_all(&state.pg)
+        .await?;
+    let mut total = 0u64;
+    for world_id in world_ids {
+        let snaps = crate::primitives::calls::store::reap_empty_group_rooms(
+            &state.pg,
+            world_id,
+            lk.empty_room_reap_secs,
+        )
+        .await?;
         for snap in &snaps {
             crate::primitives::calls::publish_snapshot(state, world_id, snap).await;
         }

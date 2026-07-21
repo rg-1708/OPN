@@ -4,7 +4,9 @@
 //! session row first, then its participants (§10.4) — the one order, so two
 //! concurrent transitions on the same call cannot deadlock.
 
-use contracts::{CallKind, CallParticipant, CallParticipantState, CallSessionState, ErrCode};
+use contracts::{
+    CallKind, CallParticipant, CallParticipantState, CallSessionState, ErrCode, Topology,
+};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -58,6 +60,14 @@ fn parse_part(s: &str) -> CallParticipantState {
         _ => CallParticipantState::Ringing,
     }
 }
+fn parse_topology(s: &str) -> Topology {
+    match s {
+        "sfu" => Topology::Sfu,
+        // Unknown/legacy rows read as p2p — the neutral default (matches the
+        // column default and the `Topology` derive).
+        _ => Topology::P2p,
+    }
+}
 
 /// Full session state for a `calls.state` snapshot (emit on every change and on
 /// subscribe). Built by every store fn that mutates or reads a call.
@@ -66,6 +76,9 @@ pub struct CallSnapshot {
     pub kind: CallKind,
     pub state: CallSessionState,
     pub participants: Vec<CallParticipant>,
+    /// `p2p` for 1:1 calls, `sfu` for group calls — decides which snapshot event
+    /// (`calls.state` vs `calls.group.state`) the emit path builds.
+    pub topology: Topology,
 }
 
 fn to_participants(rows: Vec<(Uuid, String)>) -> Vec<CallParticipant> {
@@ -178,12 +191,12 @@ pub async fn transition(
 ) -> Result<CallSnapshot, Fail> {
     let mut tx = world_tx(pool, world).await?;
 
-    let sess: Option<(String, String)> =
-        sqlx::query_as("SELECT kind, state FROM call_sessions WHERE id = $1 FOR UPDATE")
+    let sess: Option<(String, String, String)> =
+        sqlx::query_as("SELECT kind, state, topology FROM call_sessions WHERE id = $1 FOR UPDATE")
             .bind(call_id)
             .fetch_optional(&mut *tx)
             .await?;
-    let (kind, session_state) = sess.ok_or(Fail::Code(ErrCode::NotFound))?;
+    let (kind, session_state, topology) = sess.ok_or(Fail::Code(ErrCode::NotFound))?;
     let session = parse_session(&session_state);
 
     let parts: Vec<(Uuid, String)> = sqlx::query_as(
@@ -251,6 +264,7 @@ pub async fn transition(
         kind: parse_kind(&kind),
         state: trans.session,
         participants: to_participants(parts_now),
+        topology: parse_topology(&topology),
     })
 }
 
@@ -286,8 +300,8 @@ pub async fn authorize_sub(
 /// normally happen since rows are never deleted) → `NotFound`.
 pub async fn snapshot(pool: &PgPool, world: Uuid, call_id: Uuid) -> Result<CallSnapshot, Fail> {
     let mut tx = world_tx(pool, world).await?;
-    let (kind, state): (String, String) =
-        sqlx::query_as("SELECT kind, state FROM call_sessions WHERE id = $1")
+    let (kind, state, topology): (String, String, String) =
+        sqlx::query_as("SELECT kind, state, topology FROM call_sessions WHERE id = $1")
             .bind(call_id)
             .fetch_optional(&mut *tx)
             .await?
@@ -304,6 +318,7 @@ pub async fn snapshot(pool: &PgPool, world: Uuid, call_id: Uuid) -> Result<CallS
         kind: parse_kind(&kind),
         state: parse_session(&state),
         participants: to_participants(parts),
+        topology: parse_topology(&topology),
     })
 }
 
@@ -313,13 +328,14 @@ pub async fn snapshot(pool: &PgPool, world: Uuid, call_id: Uuid) -> Result<CallS
 /// per the design (§5). One `world_tx` so RLS scopes both reads.
 pub async fn active_calls(pool: &PgPool, world: Uuid) -> Result<Vec<CallSnapshot>, Fail> {
     let mut tx = world_tx(pool, world).await?;
-    let sessions: Vec<(Uuid, String, String)> = sqlx::query_as(
-        "SELECT id, kind, state FROM call_sessions WHERE state <> 'ended' ORDER BY created_at",
+    let sessions: Vec<(Uuid, String, String, String)> = sqlx::query_as(
+        "SELECT id, kind, state, topology FROM call_sessions WHERE state <> 'ended' \
+         ORDER BY created_at",
     )
     .fetch_all(&mut *tx)
     .await?;
     let mut out = Vec::with_capacity(sessions.len());
-    for (id, kind, state) in sessions {
+    for (id, kind, state, topology) in sessions {
         let parts: Vec<(Uuid, String)> = sqlx::query_as(
             "SELECT character_id, state FROM call_participants WHERE call_id = $1 \
              ORDER BY character_id",
@@ -332,6 +348,7 @@ pub async fn active_calls(pool: &PgPool, world: Uuid) -> Result<Vec<CallSnapshot
             kind: parse_kind(&kind),
             state: parse_session(&state),
             participants: to_participants(parts),
+            topology: parse_topology(&topology),
         });
     }
     tx.commit().await?;
@@ -433,8 +450,8 @@ pub async fn end_active_orphans(
 
     let mut snaps = Vec::with_capacity(ended.len());
     for id in ended {
-        let (kind, state): (String, String) =
-            sqlx::query_as("SELECT kind, state FROM call_sessions WHERE id = $1")
+        let (kind, state, topology): (String, String, String) =
+            sqlx::query_as("SELECT kind, state, topology FROM call_sessions WHERE id = $1")
                 .bind(id)
                 .fetch_one(&mut *tx)
                 .await?;
@@ -450,6 +467,7 @@ pub async fn end_active_orphans(
             kind: parse_kind(&kind),
             state: parse_session(&state),
             participants: to_participants(parts),
+            topology: parse_topology(&topology),
         });
     }
     tx.commit().await?;
@@ -482,8 +500,8 @@ pub async fn reap_zombie_rings(pool: &PgPool, world: Uuid) -> anyhow::Result<Vec
 
     let mut snaps = Vec::with_capacity(ended.len());
     for id in ended {
-        let (kind, state): (String, String) =
-            sqlx::query_as("SELECT kind, state FROM call_sessions WHERE id = $1")
+        let (kind, state, topology): (String, String, String) =
+            sqlx::query_as("SELECT kind, state, topology FROM call_sessions WHERE id = $1")
                 .bind(id)
                 .fetch_one(&mut *tx)
                 .await?;
@@ -499,8 +517,358 @@ pub async fn reap_zombie_rings(pool: &PgPool, world: Uuid) -> anyhow::Result<Vec
             kind: parse_kind(&kind),
             state: parse_session(&state),
             participants: to_participants(parts),
+            topology: parse_topology(&topology),
         });
     }
     tx.commit().await?;
     Ok(snaps)
+}
+
+// ── group calls (opn-group-calls.md G1) ──────────────────────────────────────
+//
+// Group sessions reuse these tables with topology='sfu'. No ringing state — the
+// join model puts a participant straight to 'joined'. Every mutation returns a
+// `CallSnapshot` (topology=Sfu) so the caller emits `calls.group.state`. Media
+// rides the LiveKit sidecar; Core owns only membership + the SFU room name.
+
+/// Read a group session's full snapshot inside an open tx (state, participants,
+/// topology). Every caller has already established the row exists under the
+/// session lock, so a missing row here is an internal invariant break rather
+/// than a user-facing `NotFound`. Returns `anyhow::Result`; `Fail` converts from
+/// it for the `Result<_, Fail>` callers.
+async fn group_snapshot_in_tx(
+    tx: &mut sqlx::PgConnection,
+    call_id: Uuid,
+) -> anyhow::Result<CallSnapshot> {
+    let row: Option<(String, String)> =
+        sqlx::query_as("SELECT state, topology FROM call_sessions WHERE id = $1 AND topology = 'sfu'")
+            .bind(call_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let (state, topology) =
+        row.ok_or_else(|| anyhow::anyhow!("group session {call_id} vanished under lock"))?;
+    let parts: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT character_id, state FROM call_participants WHERE call_id = $1 ORDER BY character_id",
+    )
+    .bind(call_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    Ok(CallSnapshot {
+        call_id,
+        kind: CallKind::Voice,
+        state: parse_session(&state),
+        participants: to_participants(parts),
+        topology: parse_topology(&topology),
+    })
+}
+
+/// `calls.group.create` (G1): any tenant member creates an active SFU session
+/// with `sfu_room_id = "grp_<id>"`, auto-joining as the first participant (the
+/// creator, identified later as the earliest `joined_at`). Returns the initial
+/// snapshot. `label`/`max_participants` are not persisted — there is no column
+/// for them (0014 adds only topology + sfu_room_id); the server cap is enforced
+/// at join.
+pub async fn group_create(
+    pool: &PgPool,
+    world: Uuid,
+    creator: Uuid,
+    creator_device: Uuid,
+) -> Result<CallSnapshot, Fail> {
+    let mut tx = world_tx(pool, world).await?;
+    let call_id = new_id();
+    let room = format!("grp_{call_id}");
+    sqlx::query(
+        "INSERT INTO call_sessions (id, world_id, kind, state, topology, sfu_room_id) \
+         VALUES ($1, $2, 'voice', 'active', 'sfu', $3)",
+    )
+    .bind(call_id)
+    .bind(world)
+    .bind(&room)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO call_participants (call_id, world_id, character_id, device_id, state, joined_at) \
+         VALUES ($1, $2, $3, $4, 'joined', now())",
+    )
+    .bind(call_id)
+    .bind(world)
+    .bind(creator)
+    .bind(creator_device)
+    .execute(&mut *tx)
+    .await?;
+    let snap = group_snapshot_in_tx(&mut tx, call_id).await?;
+    tx.commit().await?;
+    Ok(snap)
+}
+
+/// `calls.group.join` (G1): membership row → 'joined' (upsert; rejoin allowed).
+/// Ended session or a full room (already `cap` *other* participants joined) →
+/// `Conflict`. Returns the fresh snapshot plus the SFU room name for the token
+/// mint. No ringing — the join model admits directly.
+pub async fn group_join(
+    pool: &PgPool,
+    world: Uuid,
+    call_id: Uuid,
+    character: Uuid,
+    device: Uuid,
+    cap: i64,
+) -> Result<(CallSnapshot, String), Fail> {
+    let mut tx = world_tx(pool, world).await?;
+    let row: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT state, sfu_room_id FROM call_sessions WHERE id = $1 AND topology = 'sfu' FOR UPDATE",
+    )
+    .bind(call_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let (state, room) = row.ok_or(Fail::Code(ErrCode::NotFound))?;
+    // Room full = `cap` OTHER characters already joined (exclude self so a rejoin
+    // is never rejected by its own seat). Admission rule is the pure
+    // `group::join_admits` — ended or full → `Conflict` (ErrCode is closed).
+    let others_joined: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM call_participants \
+         WHERE call_id = $1 AND state = 'joined' AND character_id <> $2",
+    )
+    .bind(call_id)
+    .bind(character)
+    .fetch_one(&mut *tx)
+    .await?;
+    super::group::join_admits(parse_session(&state), others_joined, cap).map_err(Fail::Code)?;
+    // joined_at stamped once (COALESCE) so the earliest joiner (the creator) is
+    // stable across rejoins — the `group_end` privilege check keys on it.
+    sqlx::query(
+        "INSERT INTO call_participants (call_id, world_id, character_id, device_id, state, joined_at) \
+         VALUES ($1, $2, $3, $4, 'joined', now()) \
+         ON CONFLICT (call_id, character_id) DO UPDATE \
+           SET state = 'joined', device_id = $4, \
+               joined_at = COALESCE(call_participants.joined_at, now())",
+    )
+    .bind(call_id)
+    .bind(world)
+    .bind(character)
+    .bind(device)
+    .execute(&mut *tx)
+    .await?;
+    let snap = group_snapshot_in_tx(&mut tx, call_id).await?;
+    tx.commit().await?;
+    let room = room.unwrap_or_else(|| format!("grp_{call_id}"));
+    Ok((snap, room))
+}
+
+/// `calls.group.leave` (G1): participant → 'left'. Non-participant → `Forbidden`.
+/// The last joined leaving ends the session (empty room). Idempotent.
+pub async fn group_leave(
+    pool: &PgPool,
+    world: Uuid,
+    call_id: Uuid,
+    character: Uuid,
+) -> Result<CallSnapshot, Fail> {
+    let mut tx = world_tx(pool, world).await?;
+    let state: Option<String> =
+        sqlx::query_scalar("SELECT state FROM call_sessions WHERE id = $1 AND topology = 'sfu' FOR UPDATE")
+            .bind(call_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    state.ok_or(Fail::Code(ErrCode::NotFound))?;
+    let updated = sqlx::query(
+        "UPDATE call_participants SET state = 'left', left_at = COALESCE(left_at, now()) \
+         WHERE call_id = $1 AND character_id = $2",
+    )
+    .bind(call_id)
+    .bind(character)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if updated == 0 {
+        return Err(Fail::Code(ErrCode::Forbidden));
+    }
+    end_if_empty(&mut tx, call_id).await?;
+    let snap = group_snapshot_in_tx(&mut tx, call_id).await?;
+    tx.commit().await?;
+    Ok(snap)
+}
+
+/// `calls.group.end` (G1): creator-only teardown → session 'ended'. The creator
+/// is the earliest joiner (min `joined_at`); anyone else → `Forbidden`.
+pub async fn group_end(
+    pool: &PgPool,
+    world: Uuid,
+    call_id: Uuid,
+    character: Uuid,
+) -> Result<CallSnapshot, Fail> {
+    let mut tx = world_tx(pool, world).await?;
+    let state: Option<String> =
+        sqlx::query_scalar("SELECT state FROM call_sessions WHERE id = $1 AND topology = 'sfu' FOR UPDATE")
+            .bind(call_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    state.ok_or(Fail::Code(ErrCode::NotFound))?;
+    // ponytail: creator = earliest joiner. No creator column (0014 adds only two
+    // columns); add a `role`/`created_by` column if co-hosts ever need to end.
+    let creator: Option<Uuid> = sqlx::query_scalar(
+        "SELECT character_id FROM call_participants WHERE call_id = $1 AND joined_at IS NOT NULL \
+         ORDER BY joined_at, character_id LIMIT 1",
+    )
+    .bind(call_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if creator != Some(character) {
+        return Err(Fail::Code(ErrCode::Forbidden));
+    }
+    sqlx::query(
+        "UPDATE call_sessions SET state = 'ended', ended_at = now() \
+         WHERE id = $1 AND state <> 'ended'",
+    )
+    .bind(call_id)
+    .execute(&mut *tx)
+    .await?;
+    let snap = group_snapshot_in_tx(&mut tx, call_id).await?;
+    tx.commit().await?;
+    Ok(snap)
+}
+
+/// End an SFU session if no participant is still 'joined' (empty-room rule). The
+/// `state <> 'ended'` guard makes it idempotent. Called by leave and the
+/// participant_left webhook.
+async fn end_if_empty(tx: &mut sqlx::PgConnection, call_id: Uuid) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE call_sessions SET state = 'ended', ended_at = now() \
+         WHERE id = $1 AND state <> 'ended' \
+           AND NOT EXISTS (SELECT 1 FROM call_participants p \
+                           WHERE p.call_id = $1 AND p.state = 'joined')",
+    )
+    .bind(call_id)
+    .execute(&mut *tx)
+    .await?;
+    Ok(())
+}
+
+/// Janitor empty-group-room reap (G1): active SFU sessions older than
+/// `reap_secs` with zero joined participants are force-ended (a room whose last
+/// participant vanished without a clean leave/webhook). Returns a snapshot per
+/// ended room so the janitor emits a final `calls.group.state`. Idempotent under
+/// the per-task advisory lock.
+pub async fn reap_empty_group_rooms(
+    pool: &PgPool,
+    world: Uuid,
+    reap_secs: i64,
+) -> anyhow::Result<Vec<CallSnapshot>> {
+    let mut tx = world_tx(pool, world).await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('janitor:calls_group_reap'))")
+        .execute(&mut *tx)
+        .await?;
+    let ended: Vec<Uuid> = sqlx::query_scalar(
+        "UPDATE call_sessions SET state = 'ended', ended_at = now() \
+         WHERE topology = 'sfu' AND state = 'active' \
+           AND created_at < now() - make_interval(secs => $1) \
+           AND NOT EXISTS (SELECT 1 FROM call_participants p \
+                           WHERE p.call_id = call_sessions.id AND p.state = 'joined') \
+         RETURNING id",
+    )
+    .bind(reap_secs as f64)
+    .fetch_all(&mut *tx)
+    .await?;
+    let mut snaps = Vec::with_capacity(ended.len());
+    for id in ended {
+        snaps.push(group_snapshot_in_tx(&mut tx, id).await?);
+    }
+    tx.commit().await?;
+    Ok(snaps)
+}
+
+/// Resolve the world owning `call_id` by walking worlds (call_sessions is
+/// FORCE-RLS, so a pool-direct read sees nothing without `app.world_id`). Used
+/// only by the webhook, which arrives unauthenticated with just a room name.
+/// ponytail: O(worlds) per webhook — fine at v1 world counts; encode the world
+/// in the room name if a deploy ever runs many worlds with hot webhooks.
+async fn world_of_call(pool: &PgPool, call_id: Uuid) -> anyhow::Result<Option<Uuid>> {
+    let worlds: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM worlds")
+        .fetch_all(pool)
+        .await?;
+    for world in worlds {
+        let mut tx = world_tx(pool, world).await?;
+        let found: Option<i32> =
+            sqlx::query_scalar("SELECT 1 FROM call_sessions WHERE id = $1 AND topology = 'sfu'")
+                .bind(call_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        tx.commit().await?;
+        if found.is_some() {
+            return Ok(Some(world));
+        }
+    }
+    Ok(None)
+}
+
+/// LiveKit `participant_joined`/`participant_left` truth-sync (G1): mirror the
+/// participant row and re-snapshot. Idempotent — setting a row to its current
+/// state is a no-op, and a `left` that empties the room ends it. Unknown call
+/// (foreign room, already GC'd) → `Ok(None)`, the webhook 200s and ignores.
+pub async fn group_webhook_participant(
+    pool: &PgPool,
+    call_id: Uuid,
+    character: Uuid,
+    joined: bool,
+) -> anyhow::Result<Option<(Uuid, CallSnapshot)>> {
+    let Some(world) = world_of_call(pool, call_id).await? else {
+        return Ok(None);
+    };
+    let mut tx = world_tx(pool, world).await?;
+    // Lock the session; a concurrent leave/end serializes behind this.
+    let exists: Option<i32> =
+        sqlx::query_scalar("SELECT 1 FROM call_sessions WHERE id = $1 FOR UPDATE")
+            .bind(call_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if exists.is_none() {
+        tx.commit().await?;
+        return Ok(None);
+    }
+    if joined {
+        sqlx::query(
+            "INSERT INTO call_participants (call_id, world_id, character_id, state, joined_at) \
+             VALUES ($1, $2, $3, 'joined', now()) \
+             ON CONFLICT (call_id, character_id) DO UPDATE \
+               SET state = 'joined', joined_at = COALESCE(call_participants.joined_at, now())",
+        )
+        .bind(call_id)
+        .bind(world)
+        .bind(character)
+        .execute(&mut *tx)
+        .await?;
+    } else {
+        sqlx::query(
+            "UPDATE call_participants SET state = 'left', left_at = COALESCE(left_at, now()) \
+             WHERE call_id = $1 AND character_id = $2",
+        )
+        .bind(call_id)
+        .bind(character)
+        .execute(&mut *tx)
+        .await?;
+        end_if_empty(&mut tx, call_id).await?;
+    }
+    let snap = group_snapshot_in_tx(&mut tx, call_id).await?;
+    tx.commit().await?;
+    Ok(Some((world, snap)))
+}
+
+/// LiveKit `room_finished` truth-sync (G1): mark the session ended. Idempotent
+/// (`state <> 'ended'` guard). Unknown call → `Ok(None)`.
+pub async fn group_webhook_room_finished(
+    pool: &PgPool,
+    call_id: Uuid,
+) -> anyhow::Result<Option<(Uuid, CallSnapshot)>> {
+    let Some(world) = world_of_call(pool, call_id).await? else {
+        return Ok(None);
+    };
+    let mut tx = world_tx(pool, world).await?;
+    sqlx::query(
+        "UPDATE call_sessions SET state = 'ended', ended_at = now() \
+         WHERE id = $1 AND state <> 'ended'",
+    )
+    .bind(call_id)
+    .execute(&mut *tx)
+    .await?;
+    let snap = group_snapshot_in_tx(&mut tx, call_id).await?;
+    tx.commit().await?;
+    Ok(Some((world, snap)))
 }

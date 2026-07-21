@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::types::{
     CallKind, CallParticipant, CallSessionState, FeedActivityKind, NotifyClass, ReceiptKind,
-    VoiceAction,
+    Topology, VoiceAction,
 };
 
 /// Every server→client pushed event. Same tagging idiom as `Cmd`.
@@ -125,6 +125,25 @@ pub enum Evt {
         /// (RTCIceServer). Added in Sprint 6 part B — additive over part A.
         #[ts(type = "unknown")]
         ice_servers: serde_json::Value,
+        /// Media topology (opn-group-calls.md G0): `p2p` for 1:1 calls. Additive
+        /// over Sprint 6 — `#[serde(default)]` means an old snapshot without the
+        /// field deserializes as `p2p`, so pinned clients are unaffected.
+        #[serde(default)]
+        topology: Topology,
+    },
+
+    /// Full group-call snapshot on `call:<id>` (opn-group-calls.md G0): pushed on
+    /// every membership/state change and once on subscribe (snapshot-on-sub,
+    /// CDR-6). Full-state by design, same convention as `calls.state` — small, and
+    /// it kills the delta-desync class of bug. Durable: a dropped snapshot leaves
+    /// the client's group-call UI wrong until re-sync. `topology` is `sfu` (media
+    /// via the LiveKit sidecar), carried for symmetry with `calls.state`.
+    #[serde(rename = "calls.group.state")]
+    CallsGroupState {
+        call_id: Uuid,
+        state: CallSessionState,
+        participants: Vec<CallParticipant>,
+        topology: Topology,
     },
 
     /// Opaque WebRTC signaling relay on `call:<id>` (§10.4): offer/answer/ICE
@@ -206,6 +225,9 @@ impl Evt {
             // Full call snapshots drive the call UI; a dropped one desyncs it
             // until re-sync, so close a consumer too slow for it (§10.4).
             Evt::CallsState { .. } => EvtClass::Durable,
+            // Group snapshots drive the group-call UI, same durability as
+            // calls.state — close a consumer too slow for it (opn-group-calls.md).
+            Evt::CallsGroupState { .. } => EvtClass::Durable,
             // A dropped ICE candidate stalls setup — close rather than drop
             // (§10.4: signaling is durable, unlike the ephemeral garnish above).
             Evt::CallsSignal { .. } => EvtClass::Durable,

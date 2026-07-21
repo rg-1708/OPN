@@ -306,6 +306,33 @@ pub struct CallParticipant {
     pub state: CallParticipantState,
 }
 
+/// Call media topology (opn-group-calls.md G0). `p2p` — 1:1 calls, media flows
+/// peer-to-peer and Core relays only signaling (Sprint 6). `sfu` — group calls,
+/// media forwards through the LiveKit sidecar. Carried on every call snapshot
+/// from day one so a future topology change never breaks a pinned client
+/// (additive-only, contracts-semver.md). `p2p` is the default, so an old
+/// snapshot without the field deserializes unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum Topology {
+    #[default]
+    P2p,
+    Sfu,
+}
+
+/// `calls.group.join` ack (opn-group-calls.md G0): a short-lived LiveKit access
+/// token plus the SFU URL to dial. The client connects to the SFU directly with
+/// these — media bytes never pass through Core. Token TTL is short (≤ 60 s to
+/// connect; the LiveKit session survives token expiry). `expires_at` is RFC 3339.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct GroupJoinAck {
+    pub sfu_url: String,
+    pub token: String,
+    pub expires_at: String,
+}
+
 // ── ledger (OPN-CORE.md §10.5) ────────────────────────────────────────────────
 
 /// One transfer in a `GET /v1/ledger/history` page (§10.5). Raw `from`/`to`

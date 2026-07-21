@@ -83,6 +83,8 @@ pub fn test_config() -> Config {
         heartbeat_secs: 30,
         ice_servers: serde_json::json!([]),
         reconcile_hour: 3,
+        admin: None,
+        livekit: None,
     }
 }
 

@@ -403,6 +403,24 @@ async fn run(
             Ok(None)
         }
 
+        Cmd::CallsGroupCreate {
+            label,
+            max_participants,
+        } => Ok(Some(
+            calls::group::create(state, who, label, max_participants).await?,
+        )),
+        Cmd::CallsGroupJoin { call_id } => {
+            Ok(Some(calls::group::join(state, who, call_id).await?))
+        }
+        Cmd::CallsGroupLeave { call_id } => {
+            calls::group::leave(state, who, call_id).await?;
+            Ok(None)
+        }
+        Cmd::CallsGroupEnd { call_id } => {
+            calls::group::end(state, who, call_id).await?;
+            Ok(None)
+        }
+
         Cmd::LedgerTransfer {
             from_account,
             to_account,
@@ -515,6 +533,10 @@ fn wire_name(cmd: &Cmd) -> &'static str {
         Cmd::CallsDecline { .. } => "calls.decline",
         Cmd::CallsHangup { .. } => "calls.hangup",
         Cmd::CallsSignal { .. } => "calls.signal",
+        Cmd::CallsGroupCreate { .. } => "calls.group.create",
+        Cmd::CallsGroupJoin { .. } => "calls.group.join",
+        Cmd::CallsGroupLeave { .. } => "calls.group.leave",
+        Cmd::CallsGroupEnd { .. } => "calls.group.end",
         Cmd::LedgerTransfer { .. } => "ledger.transfer",
         Cmd::LedgerHold { .. } => "ledger.hold",
         Cmd::LedgerCapture { .. } => "ledger.capture",

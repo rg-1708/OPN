@@ -3,26 +3,59 @@
 //! and stores only its sha256 hash — the key is never recoverable after.
 
 use anyhow::{anyhow, bail, Context, Result};
-use base64::Engine;
-use rand::RngCore;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::infra::auth::api_key_hash;
+use crate::infra::auth::{api_key_hash, generate_api_key};
 use crate::infra::ids::new_id;
 
 const USAGE: &str = "usage: admin create-tenant --name <tenant-name> \
                      (--world <uuid> | --new-world <world-name>)";
 const UNFREEZE_USAGE: &str = "usage: admin unfreeze --world <uuid> --account <uuid>";
+const HASH_USAGE: &str = "usage: admin hash-password  (reads the password from stdin)";
 
 /// Entry point for `argv[1] == "admin"`. Hand-parsed (no clap).
 pub async fn run(args: &[String]) -> Result<()> {
     match args.first().map(String::as_str) {
         Some("create-tenant") => create_tenant(&args[1..]).await,
         Some("unfreeze") => unfreeze(&args[1..]).await,
-        _ => bail!("{USAGE}\n{UNFREEZE_USAGE}"),
+        Some("hash-password") => hash_password(),
+        _ => bail!("{USAGE}\n{UNFREEZE_USAGE}\n{HASH_USAGE}"),
     }
+}
+
+/// Produce the argon2id PHC string for `ADMIN_PASSWORD_HASH` (panel login,
+/// opn-panel-roadmap.md). Reads the password from stdin — never argv, so it
+/// stays out of shell history and `ps`.
+fn hash_password() -> Result<()> {
+    use std::io::Read;
+    let mut password = String::new();
+    std::io::stdin()
+        .read_to_string(&mut password)
+        .context("read password from stdin")?;
+    let password = password.trim_end_matches(['\r', '\n']);
+    if password.is_empty() {
+        bail!("empty password\n{HASH_USAGE}");
+    }
+    println!("{}", hash_admin_password(password)?);
+    Ok(())
+}
+
+/// argon2id with default params — the same verifier config
+/// `http::admin::verify_password` uses, so hashes minted here always verify.
+pub fn hash_admin_password(password: &str) -> Result<String> {
+    use argon2::password_hash::{PasswordHasher, SaltString};
+    use rand::RngCore;
+    // Salt via the workspace `rand` (0.9) — argon2's own OsRng re-export rides
+    // rand_core 0.6, which this crate doesn't pull in.
+    let mut salt_bytes = [0u8; 16];
+    rand::rng().fill_bytes(&mut salt_bytes);
+    let salt = SaltString::encode_b64(&salt_bytes).map_err(|e| anyhow!("encode salt: {e}"))?;
+    let hash = argon2::Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map_err(|e| anyhow!("hash password: {e}"))?;
+    Ok(hash.to_string())
 }
 
 async fn create_tenant(args: &[String]) -> Result<()> {
@@ -57,21 +90,17 @@ async fn create_tenant(args: &[String]) -> Result<()> {
         .await
         .context("connect owner pool")?;
 
+    // One transaction for world + tenant: a failed tenant insert must not
+    // leave an orphan world behind.
+    let mut tx = pool.begin().await.context("begin tenant create")?;
     let world_id: Uuid = if let Some(world_name) = new_world {
-        let (id,): (Uuid,) =
-            sqlx::query_as("INSERT INTO worlds (id, name) VALUES ($1, $2) RETURNING id")
-                .bind(new_id())
-                .bind(&world_name)
-                .fetch_one(&pool)
-                .await
-                .context("insert world")?;
-        id
+        create_world(&mut *tx, &world_name).await?
     } else {
         let raw = world.ok_or_else(|| anyhow!("{USAGE}"))?;
         let id = Uuid::parse_str(&raw).context("--world is not a valid uuid")?;
         let exists: Option<i32> = sqlx::query_scalar("SELECT 1 FROM worlds WHERE id = $1")
             .bind(id)
-            .fetch_optional(&pool)
+            .fetch_optional(&mut *tx)
             .await
             .context("world lookup")?;
         if exists.is_none() {
@@ -84,7 +113,7 @@ async fn create_tenant(args: &[String]) -> Result<()> {
         let has_tenant: Option<i32> =
             sqlx::query_scalar("SELECT 1 FROM tenants WHERE world_id = $1")
                 .bind(id)
-                .fetch_optional(&pool)
+                .fetch_optional(&mut *tx)
                 .await
                 .context("world tenant lookup")?;
         if has_tenant.is_some() {
@@ -93,28 +122,120 @@ async fn create_tenant(args: &[String]) -> Result<()> {
         id
     };
 
-    // 32 bytes of entropy → url-safe base64 (43 chars). High-entropy key, so
-    // the stored sha256 is the whole auth (auth.rs / §11).
-    let mut buf = [0u8; 32];
-    rand::rng().fill_bytes(&mut buf);
-    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf);
-    let key = format!("opn_{b64}");
+    let created = insert_tenant(&mut *tx, &name, world_id).await?;
+    tx.commit().await.context("commit tenant create")?;
 
+    println!("tenant id: {}", created.tenant_id);
+    println!("world id:  {world_id}");
+    println!("api key:   {}", created.raw_key);
+    println!("^ shown once — only its sha256 hash is stored, save it now.");
+    Ok(())
+}
+
+/// A freshly-created tenant. `raw_key` is the ONE-TIME plaintext API key — the
+/// caller surfaces it exactly once (CLI stdout / HTTP response body) and must
+/// never log it or write it to audit. `fingerprint` (first 8 hex of the hash)
+/// is the safe-to-persist handle (cross-cutting rule 2).
+pub struct CreatedTenant {
+    pub tenant_id: Uuid,
+    pub raw_key: String,
+    pub fingerprint: String,
+}
+
+/// Insert a new world (owner pool), returning its id. Shared by CLI
+/// `--new-world` and the admin-panel create path (one tenant per world, §5).
+pub async fn create_world(exec: impl sqlx::PgExecutor<'_>, name: &str) -> Result<Uuid> {
+    let (id,): (Uuid,) =
+        sqlx::query_as("INSERT INTO worlds (id, name) VALUES ($1, $2) RETURNING id")
+            .bind(new_id())
+            .bind(name)
+            .fetch_one(exec)
+            .await
+            .context("insert world")?;
+    Ok(id)
+}
+
+/// Mint an API key and insert the tenant row for `world_id` (owner pool). The
+/// SINGLE key-minting + tenant-insert path — CLI `create-tenant` and the admin
+/// panel POST both call it, so key generation/hashing/insert never diverge.
+/// Returns the raw key exactly once (see [`CreatedTenant`]).
+pub async fn insert_tenant(
+    exec: impl sqlx::PgExecutor<'_>,
+    name: &str,
+    world_id: Uuid,
+) -> Result<CreatedTenant> {
+    let raw_key = generate_api_key();
+    let hash = api_key_hash(&raw_key);
+    // sha256 hex is always 64 chars, so this slice never panics.
+    let fingerprint = hash[..8].to_string();
     let tenant_id = new_id();
     sqlx::query("INSERT INTO tenants (id, name, api_key_hash, world_id) VALUES ($1, $2, $3, $4)")
         .bind(tenant_id)
-        .bind(&name)
-        .bind(api_key_hash(&key))
+        .bind(name)
+        .bind(&hash)
         .bind(world_id)
-        .execute(&pool)
+        .execute(exec)
         .await
         .context("insert tenant")?;
+    Ok(CreatedTenant {
+        tenant_id,
+        raw_key,
+        fingerprint,
+    })
+}
 
-    println!("tenant id: {tenant_id}");
-    println!("world id:  {world_id}");
-    println!("api key:   {key}");
-    println!("^ shown once — only its sha256 hash is stored, save it now.");
-    Ok(())
+/// The plaintext + fingerprint of a rotated key. Same one-time-key contract as
+/// [`CreatedTenant`]: `raw_key` is surfaced once and never logged.
+pub struct RotatedKey {
+    pub fingerprint: String,
+    pub raw_key: String,
+}
+
+/// Rotate a tenant's API key: mint a new key, overwrite `api_key_hash` (owner
+/// pool). Immediate-cut — the old key stops authenticating the instant the row
+/// updates (grace-period dual-key is gated, roadmap §Admin API surface). Live
+/// sessions are unaffected: they hold JWTs verified against the `sessions` row,
+/// not the key, so they run until they expire (v1 known limit — no session kill).
+/// Returns `None` if no tenant has `id` (→ 404). Admin-panel only; the CLI has
+/// no rotate command.
+pub async fn rotate_tenant_key(pool: &PgPool, id: Uuid) -> Result<Option<RotatedKey>> {
+    let raw_key = generate_api_key();
+    let hash = api_key_hash(&raw_key);
+    let fingerprint = hash[..8].to_string();
+    let res = sqlx::query("UPDATE tenants SET api_key_hash = $2 WHERE id = $1")
+        .bind(id)
+        .bind(&hash)
+        .execute(pool)
+        .await
+        .context("rotate tenant key")?;
+    if res.rows_affected() == 0 {
+        return Ok(None);
+    }
+    Ok(Some(RotatedKey {
+        fingerprint,
+        raw_key,
+    }))
+}
+
+/// Set/clear a tenant's freeze (owner pool). `frozen = true` sets `frozen_at =
+/// now()`, refusing NEW session mints (enforced in `identity::mint_session`);
+/// `false` clears it. Returns rows affected — 0 means no such tenant (→ 404).
+/// v1 does not kill a frozen tenant's already-live sessions (known limit).
+/// Distinct from `unfreeze_account` below, which thaws a per-account balance
+/// freeze, not the tenant key.
+pub async fn set_tenant_frozen(pool: &PgPool, id: Uuid, frozen: bool) -> Result<u64> {
+    // Set to now() only when not already frozen (idempotent-ish); clear to NULL.
+    let sql = if frozen {
+        "UPDATE tenants SET frozen_at = now() WHERE id = $1"
+    } else {
+        "UPDATE tenants SET frozen_at = NULL WHERE id = $1"
+    };
+    let res = sqlx::query(sql)
+        .bind(id)
+        .execute(pool)
+        .await
+        .context("set tenant frozen")?;
+    Ok(res.rows_affected())
 }
 
 /// `admin unfreeze --world <uuid> --account <uuid>` (roadmap Sprint 7 item 7 /

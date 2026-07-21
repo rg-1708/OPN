@@ -8,11 +8,13 @@ use metrics_exporter_prometheus::PrometheusHandle;
 
 use crate::state::AppState;
 
+pub mod admin;
 pub mod auth;
 pub mod channels;
 pub mod exchange;
 pub mod feed;
 pub mod ledger;
+pub mod livekit;
 pub mod media;
 pub mod notify;
 pub mod tenant;
@@ -27,6 +29,10 @@ pub fn app_router(state: AppState) -> Router {
         .route(
             "/v1/tenants/self/exchange",
             post(exchange::exchange).get(exchange::journal),
+        )
+        .route(
+            "/v1/internal/livekit/webhook",
+            post(livekit::webhook),
         )
         .route("/v1/notify/inbox", get(notify::inbox))
         .route("/v1/media", get(media::list))

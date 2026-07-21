@@ -22,6 +22,9 @@ secret store. Set all of these on the app before the first deploy:
 | `OPN_ICE_SERVERS` | Core → `calls.state` ICE list | JSON array of `RTCIceServer`; point at the coturn |
 | `OPN_TURN_USER` / `OPN_TURN_PASSWORD` | coturn long-term creds | must match `OPN_ICE_SERVERS` |
 | `OPN_RUST_LOG` | Core log filter | optional, defaults to `info` |
+| `OPN_LIVEKIT_URL` | Core → group-call join acks | optional; the public wss host of the livekit Traefik router (e.g. `wss://livekit.example.com`); unset/empty → group calls off |
+| `OPN_LIVEKIT_API_KEY` / `OPN_LIVEKIT_API_SECRET` | Core token mint + livekit `keys:` + webhook auth | optional; all three LiveKit vars set or none — see [livekit-degraded.md](livekit-degraded.md) |
+| `OPN_ADMIN_PASSWORD_HASH` / `OPN_ADMIN_JWT_SECRET` | Core admin API (port 9091, host loopback) | optional; both or neither; unset/empty → admin surface off — see [panel-admin.md](panel-admin.md) |
 
 ## 1. Traefik TLS notes (Coolify host)
 

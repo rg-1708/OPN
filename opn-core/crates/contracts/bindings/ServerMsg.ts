@@ -6,6 +6,7 @@ import type { Err } from "./Err";
 import type { FeedActivityKind } from "./FeedActivityKind";
 import type { NotifyClass } from "./NotifyClass";
 import type { ReceiptKind } from "./ReceiptKind";
+import type { Topology } from "./Topology";
 import type { VoiceAction } from "./VoiceAction";
 import type { JsonValue } from "./serde_json/JsonValue";
 
@@ -39,4 +40,10 @@ at: string, } } | { "evt": "channels.typing", "payload": { channel_id: string, c
  * when no relay is configured. Shape: `[{ urls, username?, credential? }]`
  * (RTCIceServer). Added in Sprint 6 part B — additive over part A.
  */
-ice_servers: unknown, } } | { "evt": "calls.signal", "payload": { call_id: string, from: string, to: string, payload: unknown, } } | { "evt": "calls.voice", "payload": { call_id: string, action: VoiceAction, characters: Array<string>, } } | { "evt": "feed.activity", "payload": { app_id: string, kind: FeedActivityKind, post_id: string, actor: string, } });
+ice_servers: unknown, 
+/**
+ * Media topology (opn-group-calls.md G0): `p2p` for 1:1 calls. Additive
+ * over Sprint 6 — `#[serde(default)]` means an old snapshot without the
+ * field deserializes as `p2p`, so pinned clients are unaffected.
+ */
+topology: Topology, } } | { "evt": "calls.group.state", "payload": { call_id: string, state: CallSessionState, participants: Array<CallParticipant>, topology: Topology, } } | { "evt": "calls.signal", "payload": { call_id: string, from: string, to: string, payload: unknown, } } | { "evt": "calls.voice", "payload": { call_id: string, action: VoiceAction, characters: Array<string>, } } | { "evt": "feed.activity", "payload": { app_id: string, kind: FeedActivityKind, post_id: string, actor: string, } });

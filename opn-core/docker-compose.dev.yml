@@ -65,6 +65,28 @@ services:
       --no-tls --no-dtls --min-port=49160 --max-port=49200
       --listening-port=3478
 
+  # SFU for group voice calls (docs/opn-group-calls.md). Not Core code — Core
+  # only mints join tokens and receives webhooks; media goes client<->LiveKit
+  # directly. host networking for the same UDP-range reason as coturn; dev
+  # keys are devkey:devsecret (must match Core's LIVEKIT_API_KEY/SECRET).
+  livekit:
+    image: livekit/livekit-server:v1.13.4
+    network_mode: host
+    environment:
+      LIVEKIT_CONFIG: |
+        port: 7880
+        rtc:
+          tcp_port: 7881
+          port_range_start: 50000
+          port_range_end: 50060
+          use_external_ip: false
+        keys:
+          devkey: devsecret
+        webhook:
+          api_key: devkey
+          urls:
+            - http://localhost:8080/v1/internal/livekit/webhook
+
 volumes:
   pgdata:
   miniodata:

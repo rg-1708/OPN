@@ -268,6 +268,40 @@ pub enum Cmd {
         payload: serde_json::Value,
     },
 
+    // ── group calls (opn-group-calls.md G0) ──────────────────────────────
+    /// Create a group call (opn-group-calls.md G0). `label` is an optional
+    /// human-readable name; `max_participants`, if present, caps the room within
+    /// the server limit (config default 32 — a larger value is clamped, not
+    /// rejected). Returns `{ call_id }`. Group media rides the SFU (`topology:
+    /// "sfu"`), not the P2P path.
+    #[serde(rename = "calls.group.create")]
+    CallsGroupCreate {
+        #[ts(type = "string | null")]
+        label: Option<String>,
+        #[ts(type = "number | null")]
+        max_participants: Option<i64>,
+    },
+    /// Join a group call (opn-group-calls.md G0): Core checks membership and mints
+    /// a short-lived LiveKit token. Ack `GroupJoinAck { sfu_url, token, expires_at }`
+    /// — the client dials the SFU directly (media never transits Core). A full
+    /// room → `conflict`. v1 is open-join within the world: any character
+    /// holding the `call_id` may join (invites/allowlists are gated).
+    #[serde(rename = "calls.group.join")]
+    CallsGroupJoin {
+        call_id: Uuid,
+    },
+    /// Leave a group call (opn-group-calls.md G0). The last leave ends the session.
+    #[serde(rename = "calls.group.leave")]
+    CallsGroupLeave {
+        call_id: Uuid,
+    },
+    /// End a group call for everyone (opn-group-calls.md G0): creator/privileged
+    /// only. Tears the room down; a non-privileged caller → `forbidden`.
+    #[serde(rename = "calls.group.end")]
+    CallsGroupEnd {
+        call_id: Uuid,
+    },
+
     // ── ledger (§10.5) ───────────────────────────────────────────────────
     /// Move `amount` from `from_account` to `to_account` (§10.5). `from_account`
     /// must be the caller's; `client_uuid` is the idempotency key (a retry

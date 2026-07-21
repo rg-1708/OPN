@@ -58,6 +58,23 @@ services:
       # WebRTC ICE servers echoed into calls.state (§10.4). JSON array of
       # RTCIceServer objects pointing at the coturn below (public host/creds).
       OPN_ICE_SERVERS: ${OPN_ICE_SERVERS}
+      # Group calls (docs/opn-group-calls.md). All three unset/empty → group
+      # calls disabled, everything else runs as before. URL is what BROWSERS
+      # dial — the Traefik-terminated wss host below, not the internal name.
+      LIVEKIT_URL: ${OPN_LIVEKIT_URL:-}
+      LIVEKIT_API_KEY: ${OPN_LIVEKIT_API_KEY:-}
+      LIVEKIT_API_SECRET: ${OPN_LIVEKIT_API_SECRET:-}
+      # Admin panel API (docs/opn-panel-roadmap.md). Both unset/empty → admin
+      # surface disabled. 0.0.0.0 INSIDE the container is required for the
+      # host-loopback port publish below; the host-side bind stays 127.0.0.1
+      # (ports entry), so it is reachable only via SSH tunnel/WireGuard.
+      ADMIN_BIND: 0.0.0.0:9091
+      ADMIN_PASSWORD_HASH: ${OPN_ADMIN_PASSWORD_HASH:-}
+      ADMIN_JWT_SECRET: ${OPN_ADMIN_JWT_SECRET:-}
+    ports:
+      # Admin API: host loopback ONLY (docs/runbooks/panel-admin.md). Never a
+      # Traefik router for this — the tunnel is the front door.
+      - "127.0.0.1:9091:9091"
     healthcheck:
       # Healthz-gated rollout: Coolify/Traefik hold traffic until this passes
       # (PG SELECT 1 + Redis PING inside the handler). Rollback trigger if a new
@@ -157,6 +174,44 @@ services:
       mc alias set local http://minio:9000 ${OPN_S3_KEY} ${OPN_S3_SECRET} &&
       mc mb -p local/opn
       "
+
+  # SFU for group voice calls (docs/opn-group-calls.md). Media terminates here,
+  # never in Core — Core only mints join tokens and receives the webhooks this
+  # service posts to core:8080 over the compose network. Bridge networking (not
+  # host) so Traefik can label-route the wss signal on 7880; RTC media uses the
+  # published UDP range with use_external_ip for public ICE candidates.
+  # ponytail: 61 published UDP ports via docker-proxy; move to host networking +
+  # manual TLS if that ever measurably hurts.
+  livekit:
+    image: livekit/livekit-server:v1.13.4
+    restart: unless-stopped
+    ports:
+      - "7881:7881"
+      - "50000-50060:50000-50060/udp"
+    environment:
+      LIVEKIT_CONFIG: |
+        port: 7880
+        rtc:
+          tcp_port: 7881
+          port_range_start: 50000
+          port_range_end: 50060
+          use_external_ip: true
+        keys:
+          ${OPN_LIVEKIT_API_KEY}: ${OPN_LIVEKIT_API_SECRET}
+        webhook:
+          api_key: ${OPN_LIVEKIT_API_KEY}
+          urls:
+            - http://core:8080/v1/internal/livekit/webhook
+    labels:
+      - "traefik.enable=true"
+      # wss signal endpoint browsers dial (OPN_LIVEKIT_URL must match this
+      # host). Same Coolify caveats as the core router: hardcoded host, `https`
+      # entrypoint. ponytail: hardcoded domain, Coolify won't substitute label vars.
+      - "traefik.http.routers.opn-livekit.rule=Host(`livekit.mainframenetwork.com`)"
+      - "traefik.http.routers.opn-livekit.entrypoints=https"
+      - "traefik.http.routers.opn-livekit.tls=true"
+      - "traefik.http.routers.opn-livekit.tls.certresolver=letsencrypt"
+      - "traefik.http.services.opn-livekit.loadbalancer.server.port=7880"
 
   # WebRTC STUN/TURN (§5, §10.4). Not Core code — Core only echoes ice_servers
   # into calls.state. host networking so the relay's UDP range works without

@@ -49,6 +49,18 @@ pub async fn mint_session(
 ) -> Result<Minted, Fail> {
     let mut tx = world_tx(pool, world_id).await?;
 
+    // Frozen tenants (admin panel, opn-panel-roadmap.md P1) cannot mint NEW
+    // sessions. Checked before any row is written; already-live sessions are
+    // unaffected — they hold JWTs verified against the `sessions` row, not the
+    // tenant, so they run until they expire (v1 known limit — no session kill).
+    let frozen: bool = sqlx::query_scalar("SELECT frozen_at IS NOT NULL FROM tenants WHERE id = $1")
+        .bind(tenant_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    if frozen {
+        return Err(Fail::Code(ErrCode::Forbidden));
+    }
+
     let ch: CharRow = sqlx::query_as(
         "INSERT INTO characters (id, world_id, framework_ref) VALUES ($1, $2, $3) \
          ON CONFLICT (world_id, framework_ref) DO UPDATE SET last_seen_at = now() \

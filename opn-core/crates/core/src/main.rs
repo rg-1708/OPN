@@ -92,6 +92,54 @@ async fn main() {
         .expect("bind OPN_METRICS_BIND");
     tracing::info!(bind = %state.cfg.bind, metrics = %state.cfg.metrics_bind, "opn-core up");
 
+    // Admin panel (Sprint P0): a third router on its own private bind, only when
+    // both secrets are set. Its owner-role pool is separate from the app pool so
+    // it bypasses RLS (spans all worlds) like the CLI. Spawned as its own task —
+    // a dead admin surface must not take down the data plane. Disabled → one log
+    // line, existing deploys unaffected.
+    match state.cfg.admin.as_ref() {
+        Some(admin_cfg) => {
+            let admin_pg = PgPoolOptions::new()
+                .max_connections(4)
+                .acquire_timeout(Duration::from_secs(3))
+                .connect(&state.cfg.migrate_database_url)
+                .await
+                .expect("connect admin owner pool");
+            let admin_state = opn_core::http::admin::AdminState {
+                pg: admin_pg,
+                password_hash: Arc::new(admin_cfg.password_hash.clone()),
+                jwt_secret: Arc::new(admin_cfg.jwt_secret.clone()),
+                login_limits: Arc::new(opn_core::infra::ratelimit::RateLimitTable::default()),
+            };
+            let admin_listener = tokio::net::TcpListener::bind(admin_cfg.bind)
+                .await
+                .expect("bind ADMIN_BIND");
+            tracing::info!(bind = %admin_cfg.bind, "opn-core admin router up");
+            let server = axum::serve(
+                admin_listener,
+                http::admin::admin_router(admin_state).into_make_service(),
+            );
+            tokio::spawn(async move {
+                if let Err(e) = server.await {
+                    tracing::error!(error = %e, "admin server exited");
+                }
+            });
+        }
+        None => tracing::info!(
+            "admin router disabled: set ADMIN_PASSWORD_HASH and ADMIN_JWT_SECRET to enable"
+        ),
+    }
+
+    // Group calls (Sprint G1): enabled only when the LIVEKIT_* vars are set.
+    // Disabled → one log line; the `calls.group.*` commands fail closed and 1:1
+    // calls / the data plane are unaffected.
+    match state.cfg.livekit.as_ref() {
+        Some(lk) => tracing::info!(url = %lk.url, "group calls enabled (LiveKit SFU)"),
+        None => tracing::info!(
+            "group calls disabled: set LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET to enable"
+        ),
+    }
+
     // connect_info: the WS pre-auth per-IP cap needs the peer address.
     let app = axum::serve(
         app_listener,

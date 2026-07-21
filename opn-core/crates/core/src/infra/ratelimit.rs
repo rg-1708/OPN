@@ -87,6 +87,11 @@ pub fn class_of(cmd: &contracts::Cmd) -> Class {
         | Cmd::CallsDecline { .. }
         | Cmd::CallsHangup { .. }
         | Cmd::CallsSignal { .. }
+        // Group calls: create/join/leave/end are occasional, same as 1:1 calls.
+        | Cmd::CallsGroupCreate { .. }
+        | Cmd::CallsGroupJoin { .. }
+        | Cmd::CallsGroupLeave { .. }
+        | Cmd::CallsGroupEnd { .. }
         // Feed writes: posts/likes/comments/follows are occasional user actions;
         // reads are HTTP (part B), not rate-classed here.
         | Cmd::FeedPost { .. }
