@@ -13,7 +13,8 @@ import {
 type Variant = "primary" | "ghost" | "danger";
 
 const variants: Record<Variant, string> = {
-  primary: "bg-indigo-500 hover:bg-indigo-400 text-white disabled:bg-indigo-500/40",
+  primary:
+    "bg-indigo-500 hover:bg-indigo-400 text-white disabled:bg-indigo-500/40",
   ghost: "bg-zinc-800 hover:bg-zinc-700 text-zinc-100 disabled:opacity-40",
   danger: "bg-rose-600 hover:bg-rose-500 text-white disabled:bg-rose-600/40",
 };
@@ -102,7 +103,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   return (
     <ToastCtx.Provider value={push}>
       {children}
-      <div className="fixed bottom-4 right-4 z-[60] flex w-80 flex-col gap-2">
+      <div className="fixed bottom-4 right-4 z-60 flex w-80 flex-col gap-2">
         {toasts.map((t) => (
           <div
             key={t.id}
