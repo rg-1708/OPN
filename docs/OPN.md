@@ -129,7 +129,7 @@ Repos/deployables:
   `identity` feature, not per-app code.
 
 Auth chain: player picks character → gateway resource resolves char via
-framework bridge → `POST /v1/tenants/self/sessions {char_id, device_id}` with
+framework bridge → `POST /v1/tenants/self/sessions {framework_ref, device_id?}` with
 tenant API key → Core returns a short-lived JWT (~10 min, auto-refreshed over
 the WS) → NUI opens `wss://core.example.com/ws` and sends the token as the
 first frame (never in the URL — query strings land in proxy logs; see

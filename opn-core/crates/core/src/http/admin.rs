@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{any, delete, get, post};
+use axum::routing::{any, delete, get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -44,6 +44,7 @@ pub fn admin_router(state: AdminState) -> Router {
         .route("/admin/v1/tenants/{id}/rotate-key", post(rotate_key))
         .route("/admin/v1/tenants/{id}/freeze", post(freeze))
         .route("/admin/v1/tenants/{id}/unfreeze", post(unfreeze))
+        .route("/admin/v1/tenants/{id}/origins", put(set_origins))
         .route("/admin/v1/stats", get(stats))
         .route("/admin/v1/audit", get(audit))
         // Any other `/admin/v1/*` path (typo, trailing slash, a removed route)
@@ -263,6 +264,9 @@ struct TenantRow {
     frozen: bool,
     /// Unix-epoch seconds of the newest session for this tenant; null if none.
     last_session: Option<i64>,
+    /// Browser origins allowed on the WS `Origin` gate (NUI origins are always
+    /// allowed and never listed here).
+    allowed_origins: Vec<String>,
 }
 
 /// `GET /admin/v1/tenants` — list tenants with key fingerprint, freeze state, and
@@ -275,7 +279,8 @@ async fn tenants(_admin: AdminIdentity, State(state): State<AdminState>) -> Resp
                 substr(t.api_key_hash, 1, 8) AS fingerprint, \
                 t.frozen_at IS NOT NULL AS frozen, \
                 (SELECT extract(epoch FROM max(s.created_at))::bigint \
-                   FROM sessions s WHERE s.tenant_id = t.id) AS last_session \
+                   FROM sessions s WHERE s.tenant_id = t.id) AS last_session, \
+                t.allowed_origins \
            FROM tenants t ORDER BY t.created_at DESC",
     )
     .fetch_all(&state.pg)
@@ -459,6 +464,99 @@ async fn set_frozen(state: &AdminState, id: Uuid, frozen: bool, action: &str) ->
         return err_response(ErrCode::Internal, "internal");
     }
     Json(FreezeResp { id, frozen }).into_response()
+}
+
+#[derive(Deserialize)]
+struct SetOriginsReq {
+    origins: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct SetOriginsResp {
+    id: Uuid,
+    allowed_origins: Vec<String>,
+}
+
+/// `PUT /admin/v1/tenants/{id}/origins` — replace the tenant's browser-origin
+/// allowlist (the WS `Origin` gate, gateway/ws.rs; NUI origins are always
+/// allowed and never listed here). New connections see the change within the
+/// tenant-cache TTL (~60 s); live sockets are untouched. 404 if unknown.
+async fn set_origins(
+    _admin: AdminIdentity,
+    State(state): State<AdminState>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<SetOriginsReq>,
+) -> Response {
+    let origins = match normalize_origins(body.origins) {
+        Ok(o) => o,
+        Err(msg) => return err_response(ErrCode::Invalid, msg),
+    };
+    match sqlx::query("UPDATE tenants SET allowed_origins = $1 WHERE id = $2")
+        .bind(&origins)
+        .bind(id)
+        .execute(&state.pg)
+        .await
+    {
+        Ok(r) if r.rows_affected() == 0 => {
+            return err_response(ErrCode::NotFound, "no such tenant");
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::error!(error = %e, "admin set origins failed");
+            return err_response(ErrCode::Internal, "internal");
+        }
+    }
+    if let Err(e) = write_audit(
+        &state.pg,
+        "tenant.origins",
+        id,
+        serde_json::json!({ "origins": origins }),
+    )
+    .await
+    {
+        tracing::error!(error = %e, "admin audit write failed (origins)");
+        return err_response(ErrCode::Internal, "internal");
+    }
+    Json(SetOriginsResp {
+        id,
+        allowed_origins: origins,
+    })
+    .into_response()
+}
+
+/// Normalize + validate a browser-origin list: trim, lowercase, strip trailing
+/// `/`, dedupe (order kept). An entry must be `scheme://host[:port]` — exactly
+/// what the `Origin` header carries and what the WS gate compares by equality —
+/// so a path, whitespace, or missing scheme is rejected rather than stored as
+/// an entry that can never match.
+fn normalize_origins(raw: Vec<String>) -> Result<Vec<String>, &'static str> {
+    if raw.len() > 32 {
+        return Err("at most 32 origins");
+    }
+    let mut out: Vec<String> = Vec::with_capacity(raw.len());
+    for o in raw {
+        let mut o = o.trim().to_ascii_lowercase();
+        while o.ends_with('/') {
+            o.pop();
+        }
+        if o.is_empty() || o.len() > 255 {
+            return Err("each origin must be 1..=255 chars");
+        }
+        let Some((scheme, host)) = o.split_once("://") else {
+            return Err("origin must be scheme://host[:port]");
+        };
+        if scheme.is_empty()
+            || host.is_empty()
+            || host.contains('/')
+            || o.chars().any(|c| c.is_whitespace())
+        {
+            return Err("origin must be scheme://host[:port], no path");
+        }
+        if !out.contains(&o) {
+            out.push(o);
+        }
+    }
+    Ok(out)
 }
 
 /// `DELETE /admin/v1/tenants/{id}` → hard-delete the tenant and its key. 404 if
@@ -649,9 +747,34 @@ mod tests {
             .route("/admin/v1/tenants/{id}/rotate-key", post(noop))
             .route("/admin/v1/tenants/{id}/freeze", post(noop))
             .route("/admin/v1/tenants/{id}/unfreeze", post(noop))
+            .route("/admin/v1/tenants/{id}/origins", put(noop))
             .route("/admin/v1/stats", get(noop))
             .route("/admin/v1/audit", get(noop))
             .route("/admin/v1/{*rest}", any(noop));
+    }
+
+    // Origins are compared by string equality against the browser's `Origin`
+    // header (gateway/ws.rs), so normalization here decides whether an entry
+    // can ever match.
+    #[test]
+    fn normalize_origins_accepts_and_normalizes() {
+        let out = normalize_origins(vec![
+            "  HTTPS://App.Example.com/ ".into(),
+            "https://app.example.com".into(), // dupe after normalization
+            "http://localhost:5173".into(),
+        ])
+        .expect("valid origins");
+        assert_eq!(out, vec!["https://app.example.com", "http://localhost:5173"]);
+    }
+
+    #[test]
+    fn normalize_origins_rejects_bad_shapes() {
+        assert!(normalize_origins(vec!["app.example.com".into()]).is_err()); // no scheme
+        assert!(normalize_origins(vec!["https://a.com/app".into()]).is_err()); // path
+        assert!(normalize_origins(vec!["https://a b.com".into()]).is_err()); // whitespace
+        assert!(normalize_origins(vec!["https://".into()]).is_err()); // empty host
+        assert!(normalize_origins(vec!["/".into()]).is_err()); // empty after strip
+        assert!(normalize_origins(vec!["x".into(); 33]).is_err()); // too many
     }
 
     #[test]

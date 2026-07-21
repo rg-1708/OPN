@@ -76,7 +76,7 @@ const me = await socket.cmd("identity.me");
 | Host | How the JWT reaches you |
 |---|---|
 | FiveM NUI | Game server calls `POST /v1/tenants/self/sessions` with its tenant API key, passes the token into the NUI via a message. Your `token` provider asks the Lua side for it. |
-| Plain browser (dev, dashboards) | Any backend of yours that holds the tenant API key can mint one and serve it to the page. |
+| Plain browser (dev, dashboards) | Any backend of yours that holds the tenant API key can mint one and serve it to the page — see "Who mints the JWT and fronts Core" below. |
 
 The tenant API key itself must never ship to a browser.
 
@@ -86,11 +86,61 @@ Two separate gates, both server-side:
 
 - **WebSocket:** Core checks the `Origin` header against the tenant's
   `allowed_origins` list. FiveM NUI origins (`https://cfx-nui-*`, `nui://`)
-  are always allowed; a normal browser origin must be added to the tenant.
+  are always allowed; a normal browser origin must be added to the tenant
+  (admin panel → tenant row → Origins, live within ~60 s).
 - **HTTP reads:** Core sets no CORS headers. Inside NUI this doesn't matter
   (CEF isn't enforcing cross-origin fetch the same way); from a normal
   browser origin, serve your app same-origin with Core behind a reverse
   proxy, or terminate both behind one host.
+
+### Who mints the JWT and fronts Core
+
+Core never talks to an anonymous browser: something you run holds the tenant
+API key, mints sessions, and (for plain browsers) puts Core behind your
+origin. That "something" depends on the host:
+
+- **FiveM:** the game server is the minter. It already holds the API key and
+  a server-to-server line to Core; no proxy is needed because NUI origins are
+  always allowed. Nothing extra to deploy.
+- **Plain browser:** you deploy a small backend-for-frontend. It has exactly
+  two jobs, and neither is provided by this package or by Core:
+
+  1. **Mint sessions.** An endpoint (the `/my-session-endpoint` from §2) that
+     authenticates *your* user however you like, then calls
+     `POST /v1/tenants/self/sessions {framework_ref, device_id?}` with the
+     tenant API key and returns the resulting `token` to the page. Response
+     shape is `SessionMintResponse` (`token`, `session_id`, `character`,
+     `device`). The API key stays on this backend; the browser only ever sees
+     the ~10-minute JWT.
+
+     You do **not** pre-create characters or devices anywhere: `framework_ref`
+     is any stable string identifying *your* user (their id in your own auth
+     system). Core upserts the character by `(world, framework_ref)` on first
+     mint, and when `device_id` is omitted it reuses the character's first
+     device, creating one on first sight. Pass `device_id` only when a
+     character owns several devices and you need a specific one.
+  2. **Front Core same-origin.** Reverse-proxy `/ws` and `/v1/*` to Core on
+     the same host that serves your static app, so HTTP reads need no CORS
+     and the WS `Origin` is your own (add it to the tenant's
+     `allowed_origins`). Any reverse proxy works; e.g. nginx:
+
+     ```nginx
+     location /ws {
+       proxy_pass http://core:8080/ws;
+       proxy_http_version 1.1;
+       proxy_set_header Upgrade $http_upgrade;
+       proxy_set_header Connection "upgrade";
+       proxy_read_timeout 90s;   # Core pings every 30 s; don't cut idle sockets early
+     }
+     location /v1/ { proxy_pass http://core:8080/v1/; }
+     ```
+
+     With this in place the client config is just
+     `createOpnClient({ url: "wss://your.app/ws", token: ... })`.
+
+  The mint endpoint and the proxy can be the same process (an Express/axum
+  app that also serves the static bundle) or separate (static host + nginx +
+  a tiny token service) — Core doesn't care.
 
 ## 3. The socket lifecycle
 

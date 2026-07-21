@@ -15,6 +15,7 @@ export interface Tenant {
   fingerprint: string;
   frozen: boolean;
   last_session: number | null; // unix seconds
+  allowed_origins: string[]; // browser origins for the WS Origin gate
 }
 
 // create + rotate return the raw key EXACTLY ONCE (cross-cutting rule 2).
@@ -108,6 +109,8 @@ export const api = {
   createTenant: (name: string) => call<CreatedTenant>("POST", "/tenants", { name }),
   rotateKey: (id: string) => call<RotatedKey>("POST", `/tenants/${id}/rotate-key`),
   deleteTenant: (id: string) => call<{ id: string; deleted: boolean }>("DELETE", `/tenants/${id}`),
+  setOrigins: (id: string, origins: string[]) =>
+    call<{ id: string; allowed_origins: string[] }>("PUT", `/tenants/${id}/origins`, { origins }),
   freeze: (id: string) => call<{ id: string; frozen: boolean }>("POST", `/tenants/${id}/freeze`),
   unfreeze: (id: string) => call<{ id: string; frozen: boolean }>("POST", `/tenants/${id}/unfreeze`),
   stats: () => call<Stats>("GET", "/stats"),
