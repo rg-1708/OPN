@@ -76,6 +76,7 @@ operator. Gated below.
 | `POST /admin/v1/tenants` | create tenant → **raw API key in response, shown once** |
 | `POST /admin/v1/tenants/{id}/rotate-key` | new key (shown once), old hash invalid immediately |
 | `POST /admin/v1/tenants/{id}/freeze` / `unfreeze` | parity with CLI unfreeze |
+| `DELETE /admin/v1/tenants/{id}` | hard-delete tenant + key (irreversible); 409 if it has live sessions; audit trail survives |
 | `GET /admin/v1/stats` | counts: tenants, live sessions, active calls, msgs/24h |
 | `GET /admin/v1/audit` | admin action log, newest first |
 

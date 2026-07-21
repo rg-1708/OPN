@@ -220,6 +220,88 @@ pub async fn set_tenant_frozen(pool: &PgPool, id: Uuid, frozen: bool) -> Result<
     Ok(res.rows_affected())
 }
 
+/// Outcome of a tenant delete — the three cases the handler maps to 200/404/409.
+pub enum DeleteOutcome {
+    NotFound,
+    /// The tenant has ≥ 1 live session (`revoked_at IS NULL AND expires_at >
+    /// now()`) — refuse, so a live client can't be nuked by accident. Freeze it
+    /// and let the sessions expire, then delete.
+    HasLiveSessions,
+    /// Deleted. Carries safe handles (never the raw key) for the audit row.
+    Deleted {
+        name: String,
+        fingerprint: String,
+    },
+}
+
+/// Hard-delete a tenant and its key (owner pool, one transaction). Refuses if the
+/// tenant has any live session. Expired/revoked session rows are cleared first
+/// (they FK-block the delete, sessions.tenant_id NOT NULL), and this tenant's
+/// `admin_audit` rows are unlinked (`target_tenant` → NULL) so the operator trail
+/// survives. Irreversible — the key hash is gone; issue a fresh tenant to restore
+/// a client. Admin-panel only; the CLI has no delete.
+pub async fn delete_tenant(pool: &PgPool, id: Uuid) -> Result<DeleteOutcome> {
+    let mut tx = pool.begin().await.context("begin delete tenant")?;
+
+    // Lock the row + read safe handles; absent → NotFound. FOR UPDATE serialises
+    // against a concurrent rotate/freeze on the same tenant.
+    let row: Option<(String, String)> =
+        sqlx::query_as("SELECT name, api_key_hash FROM tenants WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("lock tenant for delete")?;
+    let Some((name, hash)) = row else {
+        return Ok(DeleteOutcome::NotFound);
+    };
+
+    // Guard: any live session blocks the delete.
+    let live: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM sessions \
+         WHERE tenant_id = $1 AND revoked_at IS NULL AND expires_at > now()",
+    )
+    .bind(id)
+    .fetch_one(&mut *tx)
+    .await
+    .context("count live sessions")?;
+    if live > 0 {
+        return Ok(DeleteOutcome::HasLiveSessions);
+    }
+
+    // Preserve the audit trail (unlink), clear FK-blocking session rows, drop it.
+    sqlx::query("UPDATE admin_audit SET target_tenant = NULL WHERE target_tenant = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .context("unlink audit rows")?;
+    sqlx::query("DELETE FROM sessions WHERE tenant_id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .context("delete tenant sessions")?;
+    sqlx::query("DELETE FROM tenants WHERE id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .context("delete tenant")?;
+
+    // Audit the deletion in the same tx. target_tenant is NULL — the tenant is
+    // gone, so its id/name/fingerprint live in `detail` (fingerprint, never the
+    // raw key — cross-cutting rule 2).
+    let fingerprint = hash[..8].to_string();
+    sqlx::query(
+        "INSERT INTO admin_audit (action, target_tenant, detail) \
+         VALUES ('tenant.delete', NULL, $1)",
+    )
+    .bind(serde_json::json!({ "id": id, "name": &name, "fingerprint": &fingerprint }))
+    .execute(&mut *tx)
+    .await
+    .context("audit tenant.delete")?;
+
+    tx.commit().await.context("commit delete tenant")?;
+    Ok(DeleteOutcome::Deleted { name, fingerprint })
+}
+
 /// `admin unfreeze --world <uuid> --account <uuid>` (roadmap Sprint 7 item 7 /
 /// Sprint 11 item 5). The deliberate human gate: nightly reconciliation freezes
 /// a drifted account (`accounts.frozen_at`, rejecting outgoing ops); after an

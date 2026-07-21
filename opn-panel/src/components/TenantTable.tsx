@@ -17,6 +17,7 @@ export function TenantTable({
   const toast = useToast();
   const [busy, setBusy] = useState<Set<string>>(new Set());
   const [confirmRotate, setConfirmRotate] = useState<Tenant | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<Tenant | null>(null);
 
   function mark(id: string, on: boolean) {
     setBusy((s) => {
@@ -48,6 +49,21 @@ export function TenantTable({
       const key = await api.rotateKey(t.id);
       onRotated(key, `${t.name} (rotated)`);
     } catch (err) {
+      toast("error", errMsg(err));
+    } finally {
+      mark(t.id, false);
+    }
+  }
+
+  async function doDelete(t: Tenant) {
+    setConfirmDelete(null);
+    mark(t.id, true);
+    try {
+      await api.deleteTenant(t.id);
+      toast("success", `${t.name} deleted`);
+      onChanged();
+    } catch (err) {
+      // 409 → "tenant has live sessions; freeze it and let them expire first"
       toast("error", errMsg(err));
     } finally {
       mark(t.id, false);
@@ -107,6 +123,14 @@ export function TenantTable({
                       >
                         {t.frozen ? "Unfreeze" : "Freeze"}
                       </Button>
+                      <Button
+                        variant="danger"
+                        disabled={rowBusy}
+                        onClick={() => setConfirmDelete(t)}
+                        className="px-2 py-1 text-xs"
+                      >
+                        Delete
+                      </Button>
                     </div>
                   </td>
                 </tr>
@@ -136,6 +160,27 @@ export function TenantTable({
             </Button>
             <Button variant="danger" onClick={() => doRotate(confirmRotate)}>
               Rotate key
+            </Button>
+          </div>
+        </Modal>
+      )}
+
+      {confirmDelete && (
+        <Modal title="Delete tenant" onClose={() => setConfirmDelete(null)}>
+          <p className="text-sm text-zinc-300">
+            Permanently delete <span className="font-medium text-zinc-100">{confirmDelete.name}</span>{" "}
+            and its API key. <span className="text-rose-300">This cannot be undone</span> — the key is
+            gone and the client must be re-issued as a new tenant.
+          </p>
+          <p className="mt-2 text-xs text-zinc-500">
+            Refused if the tenant has live sessions — freeze it and let them expire first.
+          </p>
+          <div className="mt-5 flex justify-end gap-2">
+            <Button variant="ghost" onClick={() => setConfirmDelete(null)}>
+              Cancel
+            </Button>
+            <Button variant="danger" onClick={() => doDelete(confirmDelete)}>
+              Delete tenant
             </Button>
           </div>
         </Modal>

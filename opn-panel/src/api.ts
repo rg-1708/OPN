@@ -107,6 +107,7 @@ export const api = {
   tenants: () => call<Tenant[]>("GET", "/tenants"),
   createTenant: (name: string) => call<CreatedTenant>("POST", "/tenants", { name }),
   rotateKey: (id: string) => call<RotatedKey>("POST", `/tenants/${id}/rotate-key`),
+  deleteTenant: (id: string) => call<{ id: string; deleted: boolean }>("DELETE", `/tenants/${id}`),
   freeze: (id: string) => call<{ id: string; frozen: boolean }>("POST", `/tenants/${id}/freeze`),
   unfreeze: (id: string) => call<{ id: string; frozen: boolean }>("POST", `/tenants/${id}/unfreeze`),
   stats: () => call<Stats>("GET", "/stats"),

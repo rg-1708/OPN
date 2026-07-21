@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{any, get, post};
+use axum::routing::{any, delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -40,6 +40,7 @@ pub fn admin_router(state: AdminState) -> Router {
         .route("/admin/v1/setup", post(setup))
         .route("/admin/v1/login", post(login))
         .route("/admin/v1/tenants", get(tenants).post(create_tenant))
+        .route("/admin/v1/tenants/{id}", delete(remove_tenant))
         .route("/admin/v1/tenants/{id}/rotate-key", post(rotate_key))
         .route("/admin/v1/tenants/{id}/freeze", post(freeze))
         .route("/admin/v1/tenants/{id}/unfreeze", post(unfreeze))
@@ -460,6 +461,32 @@ async fn set_frozen(state: &AdminState, id: Uuid, frozen: bool, action: &str) ->
     Json(FreezeResp { id, frozen }).into_response()
 }
 
+/// `DELETE /admin/v1/tenants/{id}` → hard-delete the tenant and its key. 404 if
+/// unknown; 409 if it has live sessions (freeze it and let them expire first).
+/// Irreversible. The audit trail survives — `crate::admin::delete_tenant` unlinks
+/// old rows and writes a `tenant.delete` row (id/name/fingerprint in `detail`).
+async fn remove_tenant(
+    _admin: AdminIdentity,
+    State(state): State<AdminState>,
+    Path(id): Path<Uuid>,
+) -> Response {
+    use crate::admin::DeleteOutcome;
+    match crate::admin::delete_tenant(&state.pg, id).await {
+        Ok(DeleteOutcome::Deleted { .. }) => {
+            Json(serde_json::json!({ "id": id, "deleted": true })).into_response()
+        }
+        Ok(DeleteOutcome::NotFound) => err_response(ErrCode::NotFound, "no such tenant"),
+        Ok(DeleteOutcome::HasLiveSessions) => err_response(
+            ErrCode::Conflict,
+            "tenant has live sessions; freeze it and let them expire first",
+        ),
+        Err(e) => {
+            tracing::error!(error = %e, "admin delete tenant failed");
+            err_response(ErrCode::Internal, "internal")
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct Stats {
     tenants: i64,
@@ -618,6 +645,7 @@ mod tests {
         let _r: Router = Router::new()
             .route("/admin/v1/login", post(noop))
             .route("/admin/v1/tenants", get(noop).post(noop))
+            .route("/admin/v1/tenants/{id}", delete(noop))
             .route("/admin/v1/tenants/{id}/rotate-key", post(noop))
             .route("/admin/v1/tenants/{id}/freeze", post(noop))
             .route("/admin/v1/tenants/{id}/unfreeze", post(noop))

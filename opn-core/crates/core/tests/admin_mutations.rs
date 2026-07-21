@@ -335,3 +335,88 @@ async fn setup_is_one_shot_then_login_verifies(admin: PgPool) {
         "login mints a token"
     );
 }
+
+/// `DELETE /admin/v1/tenants/{id}` (opn-panel-roadmap.md): a live session blocks
+/// the delete (409); with none it removes the tenant, clears leftover session
+/// rows, and preserves the audit trail (prior rows unlinked, one `tenant.delete`
+/// row with a null target + detail). Unknown id → 404.
+#[sqlx::test(migrator = "opn_core::MIGRATOR")]
+async fn delete_refuses_live_sessions_then_removes_and_unlinks_audit(admin: PgPool) {
+    let (world, tenant, _key) = seed_world_tenant(&admin).await;
+    let (state, token) = admin_state(admin.clone());
+    let app = app_pool(&admin, 2).await;
+    let del = format!("/admin/v1/tenants/{tenant}");
+
+    // A live session blocks the delete.
+    identity::mint_session(&app, tenant, world, "c1", None, 600)
+        .await
+        .expect("mint live session");
+    let (status, _) = admin_req(&state, &token, "DELETE", &del, "").await;
+    assert_eq!(status, StatusCode::CONFLICT, "live session blocks delete");
+    let present: i64 = sqlx::query_scalar("SELECT count(*) FROM tenants WHERE id = $1")
+        .bind(tenant)
+        .fetch_one(&admin)
+        .await
+        .expect("count");
+    assert_eq!(present, 1, "refused delete leaves the tenant");
+
+    // Revoke the session (no longer live) and freeze via the handler — the freeze
+    // writes an audit row pointing at this tenant, which the delete must unlink.
+    sqlx::query("UPDATE sessions SET revoked_at = now() WHERE tenant_id = $1")
+        .bind(tenant)
+        .execute(&admin)
+        .await
+        .expect("revoke session");
+    let (status, _) = admin_req(
+        &state,
+        &token,
+        "POST",
+        &format!("/admin/v1/tenants/{tenant}/freeze"),
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Now it deletes (the revoked session row is cleared too, else the FK blocks).
+    let (status, _) = admin_req(&state, &token, "DELETE", &del, "").await;
+    assert_eq!(status, StatusCode::OK, "no live sessions → deleted");
+
+    let gone: i64 = sqlx::query_scalar("SELECT count(*) FROM tenants WHERE id = $1")
+        .bind(tenant)
+        .fetch_one(&admin)
+        .await
+        .expect("count");
+    assert_eq!(gone, 0, "tenant removed");
+    let dangling: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM admin_audit WHERE target_tenant = $1")
+            .bind(tenant)
+            .fetch_one(&admin)
+            .await
+            .expect("count");
+    assert_eq!(
+        dangling, 0,
+        "no audit row still points at the deleted tenant"
+    );
+    let del_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM admin_audit \
+         WHERE action = 'tenant.delete' AND target_tenant IS NULL AND detail IS NOT NULL",
+    )
+    .fetch_one(&admin)
+    .await
+    .expect("count");
+    assert_eq!(
+        del_rows, 1,
+        "one tenant.delete row with detail, null target"
+    );
+
+    // Unknown tenant → 404.
+    let (status, _) = admin_req(
+        &state,
+        &token,
+        "DELETE",
+        &format!("/admin/v1/tenants/{}", new_id()),
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
