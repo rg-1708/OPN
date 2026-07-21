@@ -15,6 +15,7 @@
 //! gates live far above that resolution.
 
 mod callchurn;
+mod groupprobe;
 mod driver;
 mod http;
 mod linkdrop;
@@ -198,6 +199,18 @@ async fn run() -> Result<ExitCode> {
             };
             linkdrop::verify_linkdrop(http, ws, gap).await
         }
+        // livekit-down chaos probe: create+join a group call and assert Core acks
+        // and mints an SFU token — passes with the SFU killed (control plane is
+        // decoupled from SFU liveness). Reads OPN_LOADGEN_API_KEY.
+        Some("--group-probe") => {
+            let http = args
+                .get(1)
+                .ok_or_else(|| anyhow!("--group-probe needs <http> <ws>"))?;
+            let ws = args
+                .get(2)
+                .ok_or_else(|| anyhow!("--group-probe needs <http> <ws>"))?;
+            groupprobe::verify_group_probe(http, ws).await
+        }
         Some("--scenario") => {
             let path = args
                 .get(1)
@@ -208,7 +221,8 @@ async fn run() -> Result<ExitCode> {
             "usage: opn-loadgen --scenario <path.json> \
              | --verify-resume <journal.json> <ws_url> \
              | --xinstance <http> <ws_a> <ws_b> [settle_secs] \
-             | --link-drop <http> <ws> [drop_gap_secs]"
+             | --link-drop <http> <ws> [drop_gap_secs] \
+             | --group-probe <http> <ws>"
         ),
     }
 }

@@ -5,13 +5,13 @@ sprints are scope-bound, not time-bound; each has Goal / Depends on / Work
 items / Test plan / Exit criteria. Core-side contract changes below go
 through a CDR in OPN-CORE.md before implementation.
 
-**Status (2026-07-21): G0, G1, and G3 core-side shipped** (contracts, LiveKit
-service, group-call primitive, token mint, webhook sync; group rate limits,
-per-tenant concurrent-room cap, webhook-signature-failure alert, runbook). G2
-(client + web demo) targets `opn-web-conference` / `@opn/client`, now archived —
-out of scope until the web client returns. G3's two field validations (24 h soak
-with calls churning; kill-LiveKit chaos) run on the perf/prod host, not this dev
-workstation — see §G3.
+**Status (2026-07-21): G0, G1, and G3 shipped** (contracts, LiveKit service,
+group-call primitive, token mint, webhook sync; group rate limits, per-tenant
+concurrent-room cap, webhook-signature-failure alert, runbook, kill-LiveKit
+chaos drill). The 24 h soak is deferred by decision (run on the perf host when a
+release is cut; the `soak10x` baseline already gates data-plane p99). Only G2
+(client + web demo) remains — it targets `opn-web-conference` / `@opn/client`,
+now archived, so it is out of scope until the web client returns.
 
 ## Why this doc exists
 
@@ -85,8 +85,8 @@ LiveKit clients reach it directly over UDP/TCP fallback.
 |---|---|---|---|
 | G0 | Contracts + infra | Core Sprint 6 | **done** — CDR merged, contracts types, livekit service in dev compose, health checked |
 | G1 | Group-call primitive | G0 | **done** — FSM + store + token mint + webhook sync, HTTP active-calls includes groups |
-| G2 | Client + proof | G1 | `@opn/client` group-call support, minimal group-voice demo in web template |
-| G3 | Hardening | G2 | limits, janitor, perf soak with calls active, runbook |
+| G2 | Client + proof | G1 | **out of scope** — `@opn/client`/`opn-web-conference` archived; revisit when the web client returns |
+| G3 | Hardening | G1 | **done** — group rate limits, per-tenant room cap, webhook-sig alert, runbook, kill-LiveKit chaos drill; 24 h soak deferred to release |
 
 ## Sprint G2 — Client + proof
 
@@ -115,17 +115,24 @@ Work items — code (shipped): rate limits on group commands (Social class,
 (`opn_livekit_webhook_total{outcome="rejected"}` → `LivekitWebhookRejected` in
 `deploy/prometheus/alerts.yml`).
 
-Work items — field validation (perf/prod host, not the dev workstation): soak
-run (24 h, calls churning) comparing p99 against the 16 ms baseline; kill-LiveKit
-chaos. Note the fail-closed seam is config, not the running SFU: Core mints the
-access token locally and never calls the LiveKit server synchronously, so a
-*down* SFU degrades only client media — Core group commands fail closed only when
-LiveKit is *unconfigured* (`state.cfg.livekit == None` → every `calls.group.*`
-answers `forbidden`). The chaos drill therefore asserts the data plane + 1:1
-calls survive an SFU kill; the config fail-closed path is unit-covered in Core.
+Work items — kill-LiveKit chaos (shipped): `chaos/livekit-down.sh` +
+`opn-loadgen --group-probe`. The fail-closed seam is config, not the running
+SFU: Core mints the access token locally and never calls the LiveKit server
+synchronously, so a *down* SFU degrades only client **media** — Core group
+commands fail closed only when LiveKit is *unconfigured* (`state.cfg.livekit ==
+None` → every `calls.group.*` answers `forbidden`, unit-covered). The drill
+therefore asserts the contrapositive of "degrades only group media": with the
+SFU SIGKILLed, the group **control plane** still acks create/join and mints a
+token (`--group-probe`), 1:1 calls + the /link relay still run (`--link-drop`),
+and Core stays healthy — i.e. everything that is not group media survives.
 
-Exit: soak passes with no baseline regression on the data plane; kill-LiveKit
-chaos test degrades only group-call media.
+Work items — 24 h soak (deferred by decision): calls churning vs the 16 ms
+baseline, on the perf host at release time. The existing `soak10x` run already
+gates data-plane p99; the group-call soak is additive and not on the critical
+path for this workstation.
+
+Exit: kill-LiveKit chaos degrades only group-call media (control plane, 1:1, and
+data plane hold) — met by `chaos/livekit-down.sh`. Soak: deferred.
 
 ## Explicit non-goals (v1)
 
