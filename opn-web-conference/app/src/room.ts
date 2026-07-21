@@ -17,6 +17,8 @@ export interface RoomOptions {
   self: { id: string; name: string };
   members: RoomMember[];
   onLeave: () => void;
+  /** Start a 1:1 call to a member (roadmap W2). `label` is their display name. */
+  onCall: (calleeNumber: string, video: boolean, label: string) => void;
 }
 
 export interface RoomController {
@@ -50,6 +52,8 @@ export function mountRoom(opts: RoomOptions): RoomController {
   // characterId → display name (seeded from dev-auth, refreshed on membership change).
   const names = new Map<string, string>(opts.members.map((m) => [m.character_id, m.name]));
   names.set(self.id, self.name);
+  // characterId → phone number (for `calls.start`); null when the character has none.
+  const numbers = new Map<string, string | null>(opts.members.map((m) => [m.character_id, m.number]));
   // characterId → online (true/false, or null = doesn't share presence / unknown).
   const online = new Map<string, boolean | null>();
   // characterId → cleanup for its presence watch.
@@ -86,7 +90,48 @@ export function mountRoom(opts: RoomOptions): RoomController {
   const store: ChannelStore = createChannelStore(conn, roomId, {
     selfId: self.id,
     onChange: render,
+    // Core dropped us past the replay buffer — throw away the page and re-fetch.
+    onColdLoad: () => {
+      noOlder = false;
+      loadHistory();
+    },
   });
+
+  // Pagination state for "load older" (scroll to top). Older pages stop when a
+  // fetch returns fewer than a full page (we've hit the start of history).
+  let loadingOlder = false;
+  let noOlder = false;
+
+  /** Fetch the newest history page and merge it (used on open and on cold-load). */
+  function loadHistory(): void {
+    api
+      .history(roomId, conn.token)
+      .then((page) => {
+        store.ingestHistory(page);
+        render();
+      })
+      .catch(() => render());
+  }
+
+  /** Fetch the page older than the oldest message held, preserving scroll position. */
+  async function loadOlder(): Promise<void> {
+    if (loadingOlder || noOlder) return;
+    const before = store.oldestSeq();
+    if (before === null) return;
+    loadingOlder = true;
+    try {
+      const page = await api.history(roomId, conn.token, before);
+      if (page.length === 0) noOlder = true;
+      // Anchor scroll to the same message so prepending older ones doesn't jump.
+      const prevHeight = messagesEl.scrollHeight;
+      store.ingestHistory(page); // render() runs inside, prepending by seq
+      messagesEl.scrollTop += messagesEl.scrollHeight - prevHeight;
+    } catch {
+      /* transient; the next scroll retries */
+    } finally {
+      loadingOlder = false;
+    }
+  }
 
   function nameOf(id: string): string {
     return names.get(id) ?? `${id.slice(0, 8)}…`;
@@ -140,10 +185,23 @@ export function mountRoom(opts: RoomOptions): RoomController {
         const on = isSelf ? true : online.get(id);
         const dot =
           on === true ? "bg-green-500" : on === false ? "bg-gray-300" : "bg-gray-200 ring-1 ring-gray-300";
+        // Call an online member who has a phone number (roadmap W2). Buttons carry
+        // the call target in data-attrs; a delegated handler dispatches the call.
+        const number = numbers.get(id);
+        const canCall = !isSelf && on === true && !!number;
+        const callBtns = canCall
+          ? `<span class="ml-auto flex gap-1">
+              <button title="Voice call" data-call="${escapeHtml(number!)}" data-video="0" data-name="${escapeHtml(name)}"
+                class="rounded p-1 text-gray-500 hover:bg-gray-100 hover:text-green-600">📞</button>
+              <button title="Video call" data-call="${escapeHtml(number!)}" data-video="1" data-name="${escapeHtml(name)}"
+                class="rounded p-1 text-gray-500 hover:bg-gray-100 hover:text-blue-600">🎥</button>
+            </span>`
+          : "";
         return `
           <li class="flex items-center gap-2 py-1 text-sm">
             <span class="h-2.5 w-2.5 rounded-full ${dot}"></span>
             <span class="truncate">${escapeHtml(name)}${isSelf ? ` <span class="text-gray-400">(you)</span>` : ""}</span>
+            ${callBtns}
           </li>`;
       })
       .join("");
@@ -197,7 +255,11 @@ export function mountRoom(opts: RoomOptions): RoomController {
       const next = new Set(list.map((m) => m.character_id));
       names.clear();
       names.set(self.id, self.name);
-      for (const m of list) names.set(m.character_id, m.name);
+      numbers.clear();
+      for (const m of list) {
+        names.set(m.character_id, m.name);
+        numbers.set(m.character_id, m.number);
+      }
       for (const id of next) watchPresence(id);
       for (const id of [...presenceWatch.keys()]) if (!next.has(id)) unwatchPresence(id);
       renderMembers();
@@ -226,22 +288,28 @@ export function mountRoom(opts: RoomOptions): RoomController {
   input.addEventListener("input", () => store.typing());
   const onWindowFocus = (): void => store.markRead();
   window.addEventListener("focus", onWindowFocus);
+  // Scroll to the top → pull the next older history page.
+  messagesEl.addEventListener("scroll", () => {
+    if (messagesEl.scrollTop < 40) void loadOlder();
+  });
 
   el.querySelector<HTMLButtonElement>("#back")!.addEventListener("click", () => onLeave());
+
+  // Call buttons (📞/🎥) are event-delegated off the member list.
+  membersEl.addEventListener("click", (e) => {
+    const btn = (e.target as HTMLElement).closest<HTMLButtonElement>("button[data-call]");
+    if (!btn) return;
+    opts.onCall(btn.dataset.call!, btn.dataset.video === "1", btn.dataset.name ?? btn.dataset.call!);
+  });
 
   // ── boot ─────────────────────────────────────────────────────────────────────
   for (const m of opts.members) watchPresence(m.character_id);
   renderMembers();
   input.focus();
 
-  void store
-    .subscribe()
-    .then(() => api.history(roomId, conn.token))
-    .then((page) => {
-      store.ingestHistory(page); // newest-first page; the store sorts by seq
-      render();
-    })
-    .catch(() => render()); // a forbidden sub or empty history still shows the shell
+  // Subscribe, then cold-load the newest history page. A forbidden sub or empty
+  // history still shows the shell.
+  void store.subscribe().then(loadHistory, () => render());
 
   return {
     dispose(): void {

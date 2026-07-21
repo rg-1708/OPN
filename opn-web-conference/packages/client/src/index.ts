@@ -22,6 +22,14 @@ export { DedupeRing } from "./dedupe.ts";
 export { backoffMs } from "./backoff.ts";
 export { ChannelStore, createChannelStore } from "./channel.ts";
 export type { ChatMessage, ChannelStoreOptions, Receipts } from "./channel.ts";
+export { CallManager, createCallManager } from "./calls.ts";
+export type {
+  CallManagerOptions,
+  CallView,
+  CallPhase,
+  CallEndReason,
+  SignalMsg,
+} from "./calls.ts";
 export type {
   Ack,
   AckPayload,

@@ -17,6 +17,8 @@ export interface RoomSummary {
 export interface RoomMember {
   character_id: string;
   name: string;
+  /** Phone number for `calls.start` (roadmap W2); `null` if the character has none. */
+  number: string | null;
 }
 interface ApiError {
   code: string;
@@ -51,17 +53,19 @@ export const api = {
 
   listRooms: () => getJson<{ rooms: RoomSummary[] }>("/rooms").then((r) => r.rooms),
 
-  createRoom: (name: string, characterId: string, characterName: string) =>
+  createRoom: (name: string, characterId: string, characterName: string, characterNumber: string | null) =>
     postJson<RoomSummary>("/rooms", {
       name,
       character_id: characterId,
       character_name: characterName,
+      character_number: characterNumber,
     }),
 
-  joinRoom: (roomId: string, characterId: string, characterName: string) =>
+  joinRoom: (roomId: string, characterId: string, characterName: string, characterNumber: string | null) =>
     postJson<{ ok: boolean; room: RoomSummary }>(`/rooms/${roomId}/join`, {
       character_id: characterId,
       character_name: characterName,
+      character_number: characterNumber,
     }),
 
   members: (roomId: string) =>

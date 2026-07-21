@@ -2,6 +2,7 @@ import "./style.css";
 import { connect, type ConnectionState, type OpnConnection, type Push } from "@opn/client";
 import type { MePayload } from "@opn/contracts";
 import { api, type RoomSummary } from "./api.ts";
+import { mountCalls, type CallController } from "./call.ts";
 import { mountRoom, type RoomController } from "./room.ts";
 import { escapeHtml, stateBadge } from "./ui.ts";
 
@@ -19,6 +20,7 @@ interface Self {
 let conn: OpnConnection | null = null;
 let me: Self | null = null;
 let room: RoomController | null = null;
+let calls: CallController | null = null;
 let currentRoomId: string | null = null;
 let lastName = "";
 const roomNames = new Map<string, string>(); // id → name, for notify toasts
@@ -52,6 +54,8 @@ function disposeRoom(): void {
 
 function teardown(): void {
   disposeRoom();
+  calls?.dispose();
+  calls = null;
   conn?.close();
   conn = null;
   me = null;
@@ -81,9 +85,11 @@ async function doJoin(name: string): Promise<void> {
   };
   // Presence dots only mean something if this character shares presence.
   await c.cmd({ cmd: "identity.set_share_presence", payload: { on: true } }).catch(() => {});
-  // Notify surface: the topic the W2 call-ring pushes to. (In W1 a chat message
-  // never notifies an *online* member — Core skips them — so this stays quiet
-  // between two open tabs; it's wired here as the surface, per the roadmap.)
+  // 1:1 call overlay — owns one CallManager for the session; rings route here.
+  calls = mountCalls(c, me.id);
+  // Notify surface: chat activity (class `alert`) and incoming call rings (class
+  // `ring`) both push to this topic. (A chat message never notifies an *online*
+  // member — Core skips them — so alerts stay quiet between two open tabs.)
   const notifyTopic = `notify:${payload.device.id}`;
   c.on(notifyTopic, onNotify);
   await c.sub(notifyTopic).catch(() => {});
@@ -103,6 +109,16 @@ function onGlobalState(s: ConnectionState): void {
 
 function onNotify(push: Push): void {
   if (push.evt !== "notify.event") return;
+  // Incoming call ring (opn-core §10.4: notify class `ring` carries `call_id`).
+  if (push.payload.class === "ring") {
+    const r = push.payload.payload as
+      | { call_id?: string; caller_name?: string; caller_number?: string; from?: string }
+      | null;
+    if (r?.call_id) {
+      calls?.handleRing(r.call_id, r.caller_name ?? r.caller_number ?? r.from);
+    }
+    return;
+  }
   const p = push.payload.payload as { channel_id?: string } | null;
   if (p?.channel_id && p.channel_id === currentRoomId) return; // you're looking at it
   const where = p?.channel_id ? (roomNames.get(p.channel_id) ?? "another room") : "an app";
@@ -196,7 +212,7 @@ function showLobby(errorMsg?: string): void {
     const name = roomInput.value.trim();
     if (!name || !me) return;
     api
-      .createRoom(name, me.id, me.name)
+      .createRoom(name, me.id, me.name, me.number)
       .then((r) => enterRoom(r.id, r.name))
       .catch((err: unknown) => showLobby(err instanceof Error ? err.message : "could not create room"));
   });
@@ -244,7 +260,7 @@ function enterRoom(roomId: string, name: string): void {
   const c = conn;
   const self = me;
   roomNames.set(roomId, name);
-  Promise.all([api.joinRoom(roomId, self.id, self.name), api.members(roomId)])
+  Promise.all([api.joinRoom(roomId, self.id, self.name, self.number), api.members(roomId)])
     .then(([, members]) => {
       disposeRoom();
       currentRoomId = roomId;
@@ -256,6 +272,7 @@ function enterRoom(roomId: string, name: string): void {
         self: { id: self.id, name: self.name },
         members,
         onLeave: () => showLobby(),
+        onCall: (number, video, label) => calls?.startCall(number, video, label),
       });
     })
     .catch((err: unknown) => showLobby(err instanceof Error ? err.message : "could not enter room"));

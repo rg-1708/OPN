@@ -58,6 +58,16 @@ test("sends auth as the first frame and goes live on ok:true", async () => {
   assert.equal(h.conn.state, "live");
 });
 
+test("auth never acked → times out via ackTimeout, never goes live", async () => {
+  const h = build({ respond: null }); // Core never acks the first `auth` frame
+  h.factory.last.open();
+  await tick();
+  assert.equal(h.factory.last.sent[0]?.cmd, "auth"); // auth sent, now awaiting the ack
+  h.clock.advance(10_000); // past the default ackTimeoutMs
+  await tick();
+  assert.notEqual(h.conn.state, "live"); // timed out, not hung in live
+});
+
 test("bad token (4401) with no remint → closed, no reconnect", async () => {
   const h = build({ respond: null });
   h.factory.last.open();

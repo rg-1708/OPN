@@ -36,7 +36,10 @@ function defaultResponder(): Responder {
   };
 }
 
-async function build(responder: Responder = defaultResponder()): Promise<Harness> {
+async function build(
+  responder: Responder = defaultResponder(),
+  storeOpts: Partial<Parameters<typeof createChannelStore>[2]> = {},
+): Promise<Harness> {
   const clock = new MockClock();
   const factory = new SocketFactory();
   factory.configure = (s) => {
@@ -60,7 +63,11 @@ async function build(responder: Responder = defaultResponder()): Promise<Harness
     store: null as unknown as ChannelStore,
     sends: () => factory.last.sent.filter((f) => f.cmd === "channels.send"),
   };
-  h.store = createChannelStore(conn, CH, { selfId: SELF, onChange: () => (h.changes += 1) });
+  h.store = createChannelStore(conn, CH, {
+    selfId: SELF,
+    onChange: () => (h.changes += 1),
+    ...storeOpts,
+  });
   return h;
 }
 
@@ -169,6 +176,29 @@ test("resend on reconnect reuses the same client_uuid (dedupe proof)", async () 
   const resent = h.sends();
   assert.equal(resent.length, 1, "one resend on the fresh socket");
   assert.equal(clientUuid(resent[0]!), firstUuid, "same client_uuid");
+});
+
+test("resume_overflow drops acked state and triggers a cold-load", async () => {
+  let coldLoads = 0;
+  const h = await build(defaultResponder(), { onColdLoad: () => (coldLoads += 1) });
+  push(h.factory.last, { message_id: "a", seq: 3, sender: "other" });
+  push(h.factory.last, { message_id: "b", seq: 5, sender: "other" });
+  assert.equal(h.store.messages().length, 2);
+  assert.equal(h.store.oldestSeq(), 3);
+
+  h.factory.last.serverSend({
+    topic: `ch:${CH}`,
+    evt: "channels.resume_overflow",
+    payload: { channel_id: CH },
+  });
+
+  assert.equal(coldLoads, 1, "app asked to cold-load");
+  assert.equal(h.store.messages().length, 0, "acked state dropped");
+  assert.equal(h.store.oldestSeq(), null);
+  // A message that was in the wiped page re-arrives (via history or live) exactly once.
+  h.store.ingestHistory([{ message_id: "b", seq: 5, sender: "other", body: {}, at: "t" }]);
+  push(h.factory.last, { message_id: "b", seq: 5, sender: "other" });
+  assert.equal(h.store.messages().length, 1, "no duplicate after cold-load");
 });
 
 test("receipts and typing surface per-peer, self filtered out", async () => {

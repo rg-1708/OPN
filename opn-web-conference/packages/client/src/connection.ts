@@ -142,6 +142,19 @@ export class OpnConnection {
     await this.cmd({ cmd: "unsub", payload: { topic } });
   }
 
+  /**
+   * Reset a topic's resume state after a cold reload (Core sent
+   * `channels.resume_overflow` — the gap was too big to replay, OPN-CORE.md §8).
+   * Forgets the stale watermark and drops the dedupe ring so the next resub asks
+   * for the recent buffer from scratch; the channel store re-loads history over
+   * HTTP and dedupes the small overlap by `message_id`. Keeps the sub tracked.
+   */
+  resetTopic(topic: string, lastSeq: number | null = null): void {
+    const sub = this.#subs.get(topic);
+    if (sub) sub.lastSeq = lastSeq;
+    this.#dedupe.delete(topic);
+  }
+
   /** Close for good — no reconnect. */
   close(): void {
     this.#closedByUser = true;

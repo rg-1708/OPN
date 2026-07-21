@@ -43,6 +43,12 @@ export interface ChannelStoreOptions {
   typingTtlMs?: number;
   /** Debounce before auto `mark_delivered` after inbound messages. Default 400. */
   deliveredDebounceMs?: number;
+  /**
+   * Called when Core signals a resume gap too large to replay
+   * (`channels.resume_overflow`): the store has dropped its acked state, so the
+   * app must cold-load history over HTTP and `ingestHistory` it. Default no-op.
+   */
+  onColdLoad?: () => void;
 }
 
 /**
@@ -91,6 +97,7 @@ export class ChannelStore {
       typingThrottleMs: 3_000,
       typingTtlMs: 5_000,
       deliveredDebounceMs: 400,
+      onColdLoad: () => {},
       ...opts,
     };
     this.#offPush = conn.on(this.#topic, (push) => this.#onPush(push));
@@ -109,6 +116,11 @@ export class ChannelStore {
   /** Every message, ready to render: acked (by seq) then optimistic (send order). */
   messages(): ChatMessage[] {
     return [...this.#acked, ...this.#pending];
+  }
+
+  /** Lowest seq held, or `null` if empty — the `before_seq` cursor for loading older history. */
+  oldestSeq(): number | null {
+    return this.#acked[0]?.seq ?? null;
   }
 
   /** Peers currently typing (self excluded, expiry applied). */
@@ -260,8 +272,30 @@ export class ChannelStore {
       case "channels.typing":
         this.#onTyping(push.payload.character_id);
         break;
+      case "channels.resume_overflow":
+        this.#coldReload();
+        break;
       // reactions/pins/members are the app's concern; ignore here.
     }
+  }
+
+  /**
+   * Core signalled a resume gap too large to replay (`channels.resume_overflow`,
+   * OPN-CORE.md §8). Incremental resume is void: drop all acked state and the
+   * resume watermark, then ask the app to cold-load history over HTTP. Optimistic
+   * (`#pending`) sends are kept — they resend by `client_uuid` and Core dedupes.
+   */
+  #coldReload(): void {
+    this.#acked.length = 0;
+    this.#byMessageId.clear();
+    this.#receipts.clear();
+    this.#typing.clear();
+    this.#lastSeqSeen = 0;
+    this.#deliveredMarked = 0;
+    this.#readMarked = 0;
+    this.#conn.resetTopic(this.#topic); // forget the stale watermark + dedupe ring
+    this.#opts.onChange();
+    this.#opts.onColdLoad();
   }
 
   #onMessage(p: {

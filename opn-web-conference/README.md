@@ -1,17 +1,17 @@
 # opn-web-conference
 
 A deliberately tiny, pure-browser app you **fork into a private repo**: join with a
-name, chat in rooms, and — in a later sprint — place 1:1 A/V calls. Its real job
+name, chat in rooms, and place 1:1 A/V calls. Its real job
 is to be the **first consumer of the OPN data plane**: it exercises auth, the WS
 lifecycle, resume, channels, presence, notify, and calls signaling against a stock
 Core. Two things outlive the demo UI: `@opn/client` (the framework-agnostic wire
 runtime) and a living proof that *any* UI can be built against the contracts.
 
-> **Status: Sprints W0–W1 built.** What's implemented today is the scaffold,
-> `dev-auth` (now with a lobby), the wire client (now with a chat store), and an
-> app that authenticates, holds a self-healing session, and walks
-> lobby → rooms → live chat. Calls (W2) and packaging polish (W3) are not built
-> yet. See the [roadmap](#status--roadmap).
+> **Status: Sprints W0–W2 built.** What's implemented today is the scaffold,
+> `dev-auth` (now with a lobby), the wire client (now with a chat store and a call
+> manager), and an app that authenticates, holds a self-healing session, walks
+> lobby → rooms → live chat, and places 1:1 voice/video calls. Only packaging
+> polish (W3) is not built yet. See the [roadmap](#status--roadmap).
 
 ## Architecture
 
@@ -60,6 +60,29 @@ message never re-orders after its ack), resend-the-same-`client_uuid` on reconne
 `notify.event` toast fires for messages in rooms you're a member of but aren't
 currently viewing.
 
+## 1:1 calls
+
+Click an online room member's **📞** (voice) or **🎥** (video) button to place a 1:1
+call — pure browser, media over **WebRTC**, no plugin. The callee's tab **rings** (a
+browser notification *and* an in-app modal) with **accept / decline**; either side
+can **hang up**. A call that doesn't connect ends in a distinct state — **busy**,
+**declined**, **no answer**, or **ended** — surfaced as UI, not a console log.
+
+**Browser divergence (by design).** In FiveM, call audio rides pma-voice and WebRTC
+carries video only (OPN.md §6). The browser has no pma-voice, so the *same* opaque
+`calls.signal` relay also carries an audio track — **zero Core change**: the signaling
+payload is opaque by design, and this template is the proof that seam holds. The
+shared signaling code lives in `@opn/client`
+([`packages/client/src/calls.ts`](packages/client/src/calls.ts)) so both templates
+stay in sync; only track acquisition differs.
+
+**STUN/TURN.** The browser gets its ICE servers from Core's `calls.state` snapshot
+(`ice_servers`), which Core populates from the operator's tenant config — STUN by
+default; add a TURN/coturn relay for restrictive NATs. The client just uses whatever
+`ice_servers` the snapshot carries (falling back to a public STUN if it's empty). The
+`TURN_URL` env is **operator/Core-side coturn config** — it is *not* read by the
+browser.
+
 ## The 15-minute path
 
 1. **Clone** this repo (into your private fork).
@@ -96,6 +119,10 @@ currently viewing.
      duplicates**.
    - **Takeover:** open a **third tab as the same name** as an existing tab; the
      first tab surfaces **taken over**.
+   - **Calls:** click **📞** or **🎥** next to an online member — their tab **rings**
+     (notification + modal); **accept** to connect audio+video, **hang up** to end.
+     Two browsers on **separate machines** complete a video-with-audio call through a
+     stock Core + STUN.
 
 ## Environment
 
@@ -106,7 +133,7 @@ The entire config surface is four variables (see [`.env.example`](.env.example))
 | `OPN_CORE_URL`       | dev-auth **&** Vite | Core HTTP base (e.g. `http://localhost:8080`). dev-auth mints against it; Vite proxies `/ws` here (http→ws). |
 | `OPN_TENANT_API_KEY` | dev-auth **only**  | Tenant API key used to mint sessions. **Server-side only.**          |
 | `DEV_AUTH_PORT`      | dev-auth           | dev-auth listen port. Optional, default `8787`.                      |
-| `TURN_URL`           | (reserved)         | TURN relay for WebRTC calls. Optional; used by a later sprint.       |
+| `TURN_URL`           | operator / Core    | coturn relay for restrictive NATs. Optional. **Not read by the browser** — the client uses whatever `ice_servers` Core's `calls.state` snapshot carries. |
 
 > **Hard rule:** `OPN_TENANT_API_KEY` is read by `dev-auth` and **must never reach
 > the browser**. dev-auth exists precisely so the key stays server-side — mirroring
@@ -129,6 +156,9 @@ session (auto-refresh, reconnect+resume).
 - **The in-memory rooms/lobby and the lobby bot** — placeholders for **your**
   lobby. The roster lives in `dev-auth` memory, and the `__lobby__` bot exists only
   because Core gates channel membership; a real operator's lobby/auth replaces both.
+- **The 📞/🎥 call buttons and the phone numbers in the dev-auth member roster** —
+  test-rig scaffolding so a call has a target to dial. A real fork drives 1:1 calls
+  from the operator's own user directory.
 - **Keep `@opn/client` and `@opn/contracts`.** Those are the durable pieces.
 
 ## Contracts note
@@ -156,5 +186,7 @@ and delete the vendored copy. Details: [`packages/contracts/README.md`](packages
   authenticates and holds a self-healing session.
 - **W1 — done:** rooms & live chat — a `dev-auth` lobby (+ lobby bot) over Core
   group channels, and live chat via the `@opn/client` `ChannelStore`.
-- **W2:** 1:1 A/V calls.
+- **W2 — done:** 1:1 voice/video calls over WebRTC, signaled through Core
+  (`calls.*`) via the `@opn/client` `CallManager`; the browser adds an audio track
+  the FiveM template leaves to pma-voice.
 - **W3:** packaging polish.

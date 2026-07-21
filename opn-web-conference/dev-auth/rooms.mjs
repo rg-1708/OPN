@@ -10,7 +10,7 @@
 import { botCmd } from "./bot.mjs";
 import { readJson, sendJson } from "./join.mjs";
 
-/** roomId → { name, members: Map<characterId, name> }. Bot is never a member here. */
+/** roomId → { name, members: Map<characterId, { name, number }> }. Bot is never a member here. */
 const rooms = new Map();
 
 function isUuid(s) {
@@ -19,6 +19,11 @@ function isUuid(s) {
 
 function isName(s) {
   return typeof s === "string" && s.length >= 1 && s.length <= 128;
+}
+
+/** Phone number is optional (a character may have none) — accept a short string or null. */
+function isNumberOrNull(s) {
+  return s === null || s === undefined || (typeof s === "string" && s.length <= 64);
 }
 
 /** Map a bot/Core error to an HTTP status + body. */
@@ -48,10 +53,11 @@ export async function handleRooms(req, res) {
   } catch {
     return sendJson(res, 400, { code: "invalid", msg: "invalid JSON body" });
   }
-  const { name, character_id, character_name } = body ?? {};
+  const { name, character_id, character_name, character_number = null } = body ?? {};
   if (!isName(name)) return sendJson(res, 400, { code: "invalid", msg: "name 1..=128 chars" });
   if (!isUuid(character_id)) return sendJson(res, 400, { code: "invalid", msg: "character_id must be a UUID" });
   if (!isName(character_name)) return sendJson(res, 400, { code: "invalid", msg: "character_name 1..=128 chars" });
+  if (!isNumberOrNull(character_number)) return sendJson(res, 400, { code: "invalid", msg: "character_number must be a string or null" });
 
   try {
     // Bot creates the group (bot = creator + first member), then adds the
@@ -60,7 +66,7 @@ export async function handleRooms(req, res) {
     const id = created?.channel_id;
     if (!isUuid(id)) throw new Error("core returned no channel_id");
     await botCmd("channels.member_add", { channel_id: id, character_id });
-    const room = { name, members: new Map([[character_id, character_name]]) };
+    const room = { name, members: new Map([[character_id, { name: character_name, number: character_number }]]) };
     rooms.set(id, room);
     console.log(`room created: ${name} (${id}) by ${character_name}`);
     return sendJson(res, 200, summary(id, room));
@@ -83,13 +89,14 @@ export async function handleRoomJoin(req, res, roomId) {
   } catch {
     return sendJson(res, 400, { code: "invalid", msg: "invalid JSON body" });
   }
-  const { character_id, character_name } = body ?? {};
+  const { character_id, character_name, character_number = null } = body ?? {};
   if (!isUuid(character_id)) return sendJson(res, 400, { code: "invalid", msg: "character_id must be a UUID" });
   if (!isName(character_name)) return sendJson(res, 400, { code: "invalid", msg: "character_name 1..=128 chars" });
+  if (!isNumberOrNull(character_number)) return sendJson(res, 400, { code: "invalid", msg: "character_number must be a string or null" });
 
   try {
     await botCmd("channels.member_add", { channel_id: roomId, character_id });
-    room.members.set(character_id, character_name);
+    room.members.set(character_id, { name: character_name, number: character_number });
     console.log(`room join: ${character_name} → ${room.name} (${roomId})`);
     return sendJson(res, 200, { ok: true, room: summary(roomId, room) });
   } catch (e) {
@@ -97,14 +104,18 @@ export async function handleRoomJoin(req, res, roomId) {
   }
 }
 
-/** `GET /rooms/:id/members` → `[{ character_id, name }]` (the bot is excluded). */
+/** `GET /rooms/:id/members` → `[{ character_id, name, number }]` (the bot is excluded). */
 export async function handleRoomMembers(req, res, roomId) {
   if (req.method !== "GET") {
     return sendJson(res, 405, { code: "invalid", msg: "GET /rooms/:id/members" });
   }
   const room = rooms.get(roomId);
   if (!room) return sendJson(res, 404, { code: "not_found", msg: "unknown room" });
-  const members = [...room.members.entries()].map(([character_id, name]) => ({ character_id, name }));
+  const members = [...room.members.entries()].map(([character_id, m]) => ({
+    character_id,
+    name: m.name,
+    number: m.number ?? null,
+  }));
   return sendJson(res, 200, { members });
 }
 

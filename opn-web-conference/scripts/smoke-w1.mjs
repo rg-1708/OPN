@@ -128,6 +128,36 @@ async function main() {
   }
   console.log("✔ B's reply reached A, ordering by seq preserved");
 
+  // 7.5 Chaos-lite (opt-in): prove the W1 delivery guarantee across a Core
+  //     restart. A send goes out, Core is killed/restarted mid-flight; the
+  //     sender reconnects and its store resends the SAME client_uuid, so Core
+  //     dedupes and EXACTLY ONE message renders on both sides — no dup, no loss.
+  //     Needs a real Core you can restart; this env has no docker, so mirror
+  //     smoke.mjs's SMOKE_RESTART manual pause — the operator drives the restart.
+  if (process.env.SMOKE_CHAOS) {
+    const chaosText = `chaos from A ${tag}`;
+    const countA = () => storeA.messages().filter((m) => m.body.text === chaosText).length;
+    const countB = () => storeB.messages().filter((m) => m.body.text === chaosText).length;
+
+    console.log(`SMOKE_CHAOS set — sending "${chaosText}", then restart Core now (e.g. \`docker restart <core>\`)`);
+    storeA.send({ text: chaosText, media_ids: null, gif_url: null, meta: null });
+
+    // Manual kill window: wait for the sender to ride a reconnect back to live.
+    await waitFor(connA, "reconnecting", 120_000);
+    console.log("  ↳ sender dropped; waiting for it to reconnect…");
+    await waitFor(connA, "live", 120_000);
+    console.log("✔ sender reconnected — store resends the same client_uuid");
+
+    // After reconnect+resend, exactly one message with the chaos text on BOTH
+    // the sender and receiver views (client_uuid idempotency + message_id dedupe).
+    if (!(await poll(() => countA() === 1 && countB() === 1, 15_000))) {
+      throw new Error(
+        `chaos delivery not exactly-once: A=${countA()} B=${countB()}\n  A=${JSON.stringify(storeA.messages())}\n  B=${JSON.stringify(storeB.messages())}`,
+      );
+    }
+    console.log(`✔ chaos: exactly one "${chaosText}" on both sides after restart`);
+  }
+
   // 8. Clean up.
   storeA.dispose();
   storeB.dispose();
