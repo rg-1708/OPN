@@ -58,7 +58,9 @@ pub fn class_of(cmd: &contracts::Cmd) -> Class {
         | Cmd::DirectoryBlocks
         | Cmd::DirectoryResolve { .. }
         | Cmd::DirectoryListings { .. }
-        | Cmd::NotifySeen { .. } => Class::Read,
+        | Cmd::NotifySeen { .. }
+        // Server rail snapshot: one indexed member scan (gap #13).
+        | Cmd::ServersList => Class::Read,
         Cmd::IdentityAppLogin { .. }
         | Cmd::IdentitySetSettings { .. }
         | Cmd::IdentitySetSharePresence { .. }
@@ -105,7 +107,13 @@ pub fn class_of(cmd: &contracts::Cmd) -> Class {
         | Cmd::FeedComment { .. }
         | Cmd::FeedFollow { .. }
         | Cmd::FeedUnfollow { .. }
-        | Cmd::NotifyClear => Class::Social,
+        | Cmd::NotifyClear
+        // Servers (gap #13): container CRUD + membership are occasional admin
+        // actions, same bucket as group create/member changes.
+        | Cmd::ServersCreate { .. }
+        | Cmd::ServersMemberAdd { .. }
+        | Cmd::ServersMemberRemove { .. }
+        | Cmd::ServersChannelCreate { .. } => Class::Social,
         // Money movement (§12): the tight Money bucket (1/s, burst 2) — the class
         // it was added for. Transfers, holds, captures, releases all move or
         // reserve funds; a low ceiling is correct.

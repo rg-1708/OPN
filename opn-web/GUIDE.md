@@ -255,6 +255,34 @@ Receipts: send `channels.mark_read`/`mark_delivered` with the highest seq
 rendered; render other parties' watermarks from `channels.receipt` events and
 the `last_read_seq` fields already present in `channels.list`.
 
+### Servers (guild containers)
+
+A server is a membership umbrella over ordinary channels — nothing about
+messaging changes inside one. Build the Discord-style shell like this:
+
+```ts
+const rail = await socket.cmd("servers.list");          // ServerSummary[]
+const chans = await socket.cmd("channels.list");        // ChannelSummary[]
+const tree = chans.filter((c) => c.server_id === serverId);
+// Group by c.category, sort by c.position — that's the channel tree.
+```
+
+- `servers.create { name, banner_media_id }` → `{ server_id }`. The banner is
+  a live media id (upload via §9); download it with the media routes. It can
+  expire under retention — treat a 404 as "no banner".
+- `servers.channel_create` (owner only) makes a `group` (text) or `voice`
+  channel. `voice` is a marker kind: the channel still carries messages, and
+  audio rides group calls (§8) — create/join a `calls.group.*` room and
+  announce its `call_id` in the channel.
+- Membership is server-level only: `servers.member_add` (owner) /
+  `servers.member_remove` (owner kicks, anyone leaves; the owner can't
+  leave). Core mirrors it into every channel of the server —
+  `channels.member_add`/`member_remove` on a server channel answers
+  `conflict`.
+- The affected user gets a silent `notify.event` (app_id `servers`, kind
+  `server_member_added` / `server_member_removed`, payload
+  `{ server_id, server_name }`) — refresh the rail on it.
+
 ## 7. State: bring your own
 
 The socket is intentionally not a store. It gives you acks and event streams;

@@ -12,6 +12,7 @@ pub mod identity;
 pub mod ledger;
 pub mod media;
 pub mod notify;
+pub mod servers;
 
 /// Handler failure: a deliberate protocol error (acked with its code) or an
 /// internal error (logged, acked `internal` with no detail — §7).

@@ -398,8 +398,10 @@ assignment.
 
 Tables:
 ```
-channels        (id, world_id, kind, name, meta jsonb, last_seq bigint, created_at)
-                -- kind: sms | group | dm | match | mail
+channels        (id, world_id, kind, name, meta jsonb, last_seq bigint, created_at,
+                 server_id uuid NULL, category text NULL, position int)
+                -- kind: sms | group | dm | match | mail | voice (§10.2a)
+                -- server_id/category/position: container fields, NULL/0 for plain threads
 channel_members (channel_id, character_id, joined_at,
                  last_delivered_seq bigint, last_read_seq bigint, muted bool)
 messages        (id, channel_id, seq, sender_character, body jsonb, client_uuid, created_at)
@@ -441,6 +443,55 @@ Notes:
   `channels.open_direct { number }` with a unique index on the ordered
   character pair — no duplicate threads, no member-set hashing. Groups are
   always explicit `channels.create`.
+
+### 10.2a servers (guild containers — contract gap #13, closes §17 Q2)
+
+A server is a **membership umbrella over ordinary channels**, not a new
+message plane. Server channels ARE channels: send, history, receipts,
+reactions, resume, `ch:` topic authz, and RLS are all untouched. The
+primitive owns only the container CRUD and one invariant — **the
+channel-membership mirror**: `channel_members` rows for a server's channels
+always equal `server_members`. Membership changes go through `servers.*`
+only; `channels.member_add/remove` on a channel with a `server_id` answers
+`conflict`.
+
+Tables:
+```
+servers        (id, world_id, name, banner_media_id uuid NULL, owner_character, created_at)
+               -- banner has NO media FK: retention may delete the row; clients treat 404 as no banner
+server_members (server_id, world_id, character_id, joined_at)  -- PK (server_id, character_id)
+```
+
+Commands: `servers.create { name, banner_media_id? }` (caller = owner +
+first member), `servers.list` (own memberships → `ServerSummary[]`),
+`servers.member_add` (owner only, ≤ 200 members),
+`servers.member_remove` (owner kicks anyone else; anyone removes self; the
+owner cannot leave — ownership transfer is out of scope),
+`servers.channel_create { server_id, name, kind, category?, position }`
+(owner only, ≤ 50 channels, kind `group` | `voice`).
+
+Notes:
+- **The channel tree is `channels.list`**: rows carry
+  `server_id/category/position`; the client filters by server and groups by
+  category. No separate `servers.channels` read — one snapshot feeds both
+  the Home sidebar and every server tree.
+- **`voice` is a marker kind.** Audio rides the existing group-call
+  primitive (opn-group-calls.md); a voice channel still carries messages. Binding an
+  active `call_id` to a voice channel is deliberately deferred — clients
+  announce the room in-channel until a real need shows up.
+- Member add/remove routes a **silent** `notify.event` (app_id `servers`,
+  kind `server_member_added|server_member_removed`,
+  payload `{ server_id, server_name }`) to the affected character — rail
+  refresh, no buzz. A removed member's live `ch:` subscriptions to the
+  server's channels are dropped server-side.
+- Mirror mechanics: member add copies the roster into every existing
+  channel (`ON CONFLICT DO NOTHING`); channel create copies the current
+  roster in; remove deletes the member's rows for the server's channels
+  (watermarks reset on rejoin). Server row is `FOR UPDATE`-locked in both
+  paths so concurrent add/create can't skew the mirror.
+- **No roles, no categories-as-entities, no invites** in v1: owner-only
+  administration is the deliberate floor. Roles/permissions arrive only if
+  a real app outgrows it.
 
 ### 10.3 feed (post-MVP — primitive built, no first-party app in v1)
 
@@ -850,9 +901,10 @@ not by cursor possession.
    **pairs only.** Groups are always explicit `channels.create` (creator +
    member list) — no member-set hashing, no ambiguity. Unique index on the
    ordered pair for sms/dm kinds.
-2. ~~Guild-kind channels~~ — deferred entirely with guild-style apps
-   (OPN.md §14.5); no `guild` kind in v1 schema. Design it when such an app
-   is actually planned.
+2. ~~Guild-kind channels~~ — designed and shipped as the servers container
+   (§10.2a, contract gap #13) once a guild-style client actually landed: a
+   membership umbrella mirrored into ordinary channels, no new message
+   plane, no `guild` message kind.
 3. ~~Media HEAD-on-commit vs janitor sweep~~ — decided: async janitor
    verification (§10.6); commit stays fast, bypasses can't persist.
 4. ~~Tenant link protocol versioning~~ — decided: version handshake in the

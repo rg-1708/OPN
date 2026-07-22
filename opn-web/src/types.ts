@@ -4,6 +4,7 @@ import type { ErrCode } from "@opn/contracts/bindings/ErrCode";
 import type { MePayload } from "@opn/contracts/bindings/MePayload";
 import type { ChannelSummary } from "@opn/contracts/bindings/ChannelSummary";
 import type { ChannelMember } from "@opn/contracts/bindings/ChannelMember";
+import type { ServerSummary } from "@opn/contracts/bindings/ServerSummary";
 import type { ContactItem } from "@opn/contracts/bindings/ContactItem";
 import type { ResolveResult } from "@opn/contracts/bindings/ResolveResult";
 import type { GroupJoinAck } from "@opn/contracts/bindings/GroupJoinAck";
@@ -43,6 +44,9 @@ export interface AckPayloads {
   "channels.create": { channel_id: string };
   "channels.list": ChannelSummary[];
   "channels.members": ChannelMember[];
+  "servers.create": { server_id: string };
+  "servers.list": ServerSummary[];
+  "servers.channel_create": { channel_id: string };
   "directory.contacts": ContactItem[];
   "directory.resolve": ResolveResult;
   "directory.listing_create": { id: string };

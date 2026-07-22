@@ -118,6 +118,16 @@ pub struct ChannelSummary {
     /// reveals nothing the directory keeps opaque.
     #[ts(type = "string | null")]
     pub peer_number: Option<String>,
+    /// Owning server for server channels (§10.2a), `null` for plain threads.
+    /// The client groups matching rows under the server's channel tree.
+    #[ts(type = "string | null")]
+    pub server_id: Option<Uuid>,
+    /// Tree category label within a server (client-defined grouping); `null`
+    /// outside servers or for uncategorized channels.
+    #[ts(type = "string | null")]
+    pub category: Option<String>,
+    /// Sort key within a server's tree; 0 for plain threads.
+    pub position: i32,
 }
 
 /// One reaction on a history row (§10.2): the emoji and who reacted. Same
@@ -160,6 +170,25 @@ pub struct MessageItem {
 #[ts(export)]
 pub struct ChannelMember {
     pub character_id: Uuid,
+    pub joined_at: String,
+}
+
+/// One row of the `servers.list` snapshot (§10.2a, contract gap #13): a
+/// server the caller belongs to. Channels come from `channels.list`
+/// (`server_id`-matching rows), not from here.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ServerSummary {
+    pub server_id: Uuid,
+    pub name: String,
+    /// Banner image, downloadable via the media routes. May dangle after
+    /// media retention expires (no FK) — treat a 404 as "no banner".
+    #[ts(type = "string | null")]
+    pub banner_media_id: Option<Uuid>,
+    pub owner_character_id: Uuid,
+    #[ts(type = "number")]
+    pub member_count: i64,
+    /// When the caller joined (RFC 3339).
     pub joined_at: String,
 }
 

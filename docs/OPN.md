@@ -56,7 +56,7 @@ them — a new app is UI + a manifest, not a new backend.
 
 Examples of composition:
 - **Messages** = `channels(kind=sms)` + `directory` + `media` + `notify`
-- **Guild-style chat app** (post-MVP) = `channels` + `calls` + `media` + `notify` — *zero new backend*
+- **Guild-style chat app** = `servers` (thin container, OPN-CORE.md §10.2a) + `channels` + `calls` + `media` + `notify`
 - **Marketplace** = own listings table + `ledger` (escrowed hold) + `channels(kind=dm)` for buyer↔seller
 
 Rule of thumb: an app may own *app-specific* tables (listings, tinder profiles),

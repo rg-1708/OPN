@@ -276,6 +276,9 @@ struct SummaryRow {
     peer_number: Option<String>,
     peer_char: Option<Uuid>,
     peer_spoke: Option<bool>,
+    server_id: Option<Uuid>,
+    category: Option<String>,
+    position: i32,
 }
 
 /// The caller's memberships (§10.2): channel row + own watermarks + a
@@ -298,6 +301,7 @@ pub async fn list_memberships(
     // caller's channel count, so no index beyond messages_channel_seq is needed.
     let rows: Vec<SummaryRow> = sqlx::query_as(
         "SELECT c.id, c.kind, c.name, c.last_seq, \
+                c.server_id, c.category, c.position, \
                 m.last_read_seq, m.last_delivered_seq, m.muted, \
                 lm.seq AS lm_seq, lm.sender_character AS lm_sender, \
                 lm.body AS lm_body, lm.created_at AS lm_created_at, \
@@ -355,6 +359,9 @@ pub async fn list_memberships(
                 _ => None,
             },
             peer_number: r.peer_number,
+            server_id: r.server_id,
+            category: r.category,
+            position: r.position,
         })
         .collect())
 }
@@ -661,14 +668,17 @@ pub async fn member_change(
     let mut tx = world_tx(pool, world).await?;
 
     // Lock + kind check: RLS-hidden/unknown → NotFound; non-group → Conflict.
-    let kind: Option<String> =
-        sqlx::query_scalar("SELECT kind FROM channels WHERE id = $1 FOR UPDATE")
+    // Server channels are Conflict too — their membership mirrors
+    // server_members and is only changed via servers.member_* (§10.2a).
+    let row: Option<(String, Option<Uuid>)> =
+        sqlx::query_as("SELECT kind, server_id FROM channels WHERE id = $1 FOR UPDATE")
             .bind(channel_id)
             .fetch_optional(&mut *tx)
             .await?;
-    match kind.as_deref() {
+    match row {
         None => return Err(Fail::Code(ErrCode::NotFound)),
-        Some("group") => {}
+        Some((_, Some(_))) => return Err(Fail::Code(ErrCode::Conflict)),
+        Some((k, None)) if k == "group" => {}
         Some(_) => return Err(Fail::Code(ErrCode::Conflict)),
     }
 

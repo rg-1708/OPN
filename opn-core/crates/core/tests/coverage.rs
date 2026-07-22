@@ -46,6 +46,11 @@ fn every_cmd_names_its_covering_test() {
             }
             Cmd::ChannelsMembers { .. } => "channels_members_resume::members_roster_and_authz",
             Cmd::ChannelsSetMuted { .. } => "channels_members_resume::set_muted_toggles_and_authz",
+            Cmd::ServersCreate { .. } => "servers::create_server_channels_and_list",
+            Cmd::ServersList => "servers::create_server_channels_and_list",
+            Cmd::ServersMemberAdd { .. } => "servers::membership_mirror_and_authz",
+            Cmd::ServersMemberRemove { .. } => "servers::membership_mirror_and_authz",
+            Cmd::ServersChannelCreate { .. } => "servers::create_server_channels_and_list",
             Cmd::MediaRequestUpload { .. } => {
                 "media::request_upload_commit_roundtrip, media::caps_enforced"
             }

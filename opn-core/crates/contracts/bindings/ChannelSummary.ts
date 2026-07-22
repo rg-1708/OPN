@@ -30,4 +30,18 @@ peer_character_id: string | null,
  * — the same number already rides the ring payload as caller-ID — so this
  * reveals nothing the directory keeps opaque.
  */
-peer_number: string | null, };
+peer_number: string | null, 
+/**
+ * Owning server for server channels (§10.2a), `null` for plain threads.
+ * The client groups matching rows under the server's channel tree.
+ */
+server_id: string | null, 
+/**
+ * Tree category label within a server (client-defined grouping); `null`
+ * outside servers or for uncategorized channels.
+ */
+category: string | null, 
+/**
+ * Sort key within a server's tree; 0 for plain threads.
+ */
+position: number, };

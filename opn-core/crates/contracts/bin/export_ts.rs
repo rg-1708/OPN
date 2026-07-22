@@ -23,6 +23,8 @@ fn main() {
     // channels.members ack rides the WS ack as an opaque value, so export it
     // explicitly for the TS SDK.
     contracts::ChannelMember::export_all_to(dir).expect("export ChannelMember");
+    // servers.list ack rides the WS ack as an opaque value, same deal.
+    contracts::ServerSummary::export_all_to(dir).expect("export ServerSummary");
     // media: request_upload ack and the gallery row (UploadTarget rides along
     // as a dependency of UploadTicket).
     contracts::UploadTicket::export_all_to(dir).expect("export UploadTicket");

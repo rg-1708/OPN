@@ -156,6 +156,53 @@ pub enum Cmd {
         muted: bool,
     },
 
+    // ── servers (§10.2a, contract gap #13) ───────────────────────────────
+    /// Create a server (channel container). Caller becomes owner + first
+    /// member. `banner_media_id` must reference live media when present.
+    /// Ack `{ server_id }`.
+    #[serde(rename = "servers.create")]
+    ServersCreate {
+        name: String,
+        #[ts(type = "string | null")]
+        banner_media_id: Option<Uuid>,
+    },
+    /// Snapshot of the caller's server memberships. Ack `ServerSummary[]`.
+    /// The per-server channel tree comes from `channels.list` (rows with a
+    /// matching `server_id`, grouped by `category`, ordered by `position`).
+    #[serde(rename = "servers.list")]
+    ServersList,
+    /// Add a member (owner only; `forbidden` otherwise). Idempotent. The new
+    /// member gains membership in every channel of the server; they learn of
+    /// it via a `notify.event` (app_id `servers`, kind `server_member_added`).
+    #[serde(rename = "servers.member_add")]
+    ServersMemberAdd {
+        server_id: Uuid,
+        character_id: Uuid,
+    },
+    /// Remove a member: the owner may remove anyone else, anyone may remove
+    /// themself (leave). The owner cannot leave their own server (`conflict`;
+    /// ownership transfer is out of scope). Drops the member from every
+    /// channel of the server and their live subscriptions to them.
+    #[serde(rename = "servers.member_remove")]
+    ServersMemberRemove {
+        server_id: Uuid,
+        character_id: Uuid,
+    },
+    /// Create a channel inside a server (owner only). `kind` is `group`
+    /// (text) or `voice` (a marker kind: audio itself rides the existing
+    /// group-call primitive; a voice channel still carries messages).
+    /// `category`/`position` only drive the client's tree. Every current
+    /// server member becomes a channel member. Ack `{ channel_id }`.
+    #[serde(rename = "servers.channel_create")]
+    ServersChannelCreate {
+        server_id: Uuid,
+        name: String,
+        kind: String,
+        #[ts(type = "string | null")]
+        category: Option<String>,
+        position: i32,
+    },
+
     // ── media (§10.6) ────────────────────────────────────────────────────
     /// Request a presigned upload (§10.6): validates the kind/mime pair and the
     /// size cap, inserts a `pending` row, and returns S3 POST policies (one for

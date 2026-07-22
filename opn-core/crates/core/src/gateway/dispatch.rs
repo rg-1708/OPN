@@ -17,7 +17,9 @@ use super::topic::TopicKind;
 use crate::infra::auth::mint_jwt;
 use crate::infra::cursor;
 use crate::infra::ratelimit::class_of;
-use crate::primitives::{calls, channels, directory, feed, identity, ledger, media, notify, Fail};
+use crate::primitives::{
+    calls, channels, directory, feed, identity, ledger, media, notify, servers, Fail,
+};
 use crate::state::AppState;
 
 /// Handles one parsed frame, returns the ack. Never panics, never closes —
@@ -300,6 +302,51 @@ async fn run(
             Ok(None)
         }
 
+        Cmd::ServersCreate {
+            name,
+            banner_media_id,
+        } => Ok(Some(
+            servers::create(state, who, &name, banner_media_id).await?,
+        )),
+        Cmd::ServersList => {
+            let list = servers::list(state, who).await?;
+            Ok(Some(
+                serde_json::to_value(list).map_err(anyhow::Error::from)?,
+            ))
+        }
+        Cmd::ServersMemberAdd {
+            server_id,
+            character_id,
+        } => {
+            servers::member_change(state, who, server_id, character_id, true).await?;
+            Ok(None)
+        }
+        Cmd::ServersMemberRemove {
+            server_id,
+            character_id,
+        } => {
+            servers::member_change(state, who, server_id, character_id, false).await?;
+            Ok(None)
+        }
+        Cmd::ServersChannelCreate {
+            server_id,
+            name,
+            kind,
+            category,
+            position,
+        } => Ok(Some(
+            servers::channel_create(
+                state,
+                who,
+                server_id,
+                &name,
+                &kind,
+                category.as_deref(),
+                position,
+            )
+            .await?,
+        )),
+
         Cmd::MediaRequestUpload { kind, bytes, mime } => {
             let ticket = media::request_upload(state, who, kind, bytes, &mime).await?;
             Ok(Some(
@@ -528,6 +575,11 @@ fn wire_name(cmd: &Cmd) -> &'static str {
         Cmd::ChannelsMemberRemove { .. } => "channels.member_remove",
         Cmd::ChannelsMembers { .. } => "channels.members",
         Cmd::ChannelsSetMuted { .. } => "channels.set_muted",
+        Cmd::ServersCreate { .. } => "servers.create",
+        Cmd::ServersList => "servers.list",
+        Cmd::ServersMemberAdd { .. } => "servers.member_add",
+        Cmd::ServersMemberRemove { .. } => "servers.member_remove",
+        Cmd::ServersChannelCreate { .. } => "servers.channel_create",
         Cmd::MediaRequestUpload { .. } => "media.request_upload",
         Cmd::MediaCommit { .. } => "media.commit",
         Cmd::DirectoryContactUpsert { .. } => "directory.contact_upsert",

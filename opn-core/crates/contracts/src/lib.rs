@@ -19,8 +19,8 @@ pub use types::{
     ChannelMember, ChannelSummary, CharacterInfo, CommentItem, ContactItem, DeviceInfo,
     FeedActivityKind, GroupJoinAck, InboxItem, LinkHello, ListingItem, MePayload, MediaItem,
     MediaKind, MessageBody, MessageItem, MessagePreview, NotifyClass, PostItem, ReactionItem,
-    ReceiptKind, ResolveResult, SessionMintResponse, Topology, TransferItem, UploadTarget,
-    UploadTicket, VoiceAction,
+    ReceiptKind, ResolveResult, ServerSummary, SessionMintResponse, Topology, TransferItem,
+    UploadTarget, UploadTicket, VoiceAction,
 };
 
 /// This crate's version, embedded at compile time from `Cargo.toml`
