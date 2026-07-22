@@ -3,6 +3,7 @@ import type { Evt } from "@opn/contracts/bindings/Evt";
 import type { ErrCode } from "@opn/contracts/bindings/ErrCode";
 import type { MePayload } from "@opn/contracts/bindings/MePayload";
 import type { ChannelSummary } from "@opn/contracts/bindings/ChannelSummary";
+import type { ChannelMember } from "@opn/contracts/bindings/ChannelMember";
 import type { ContactItem } from "@opn/contracts/bindings/ContactItem";
 import type { ResolveResult } from "@opn/contracts/bindings/ResolveResult";
 import type { GroupJoinAck } from "@opn/contracts/bindings/GroupJoinAck";
@@ -41,6 +42,7 @@ export interface AckPayloads {
   "channels.open_direct": { channel_id: string };
   "channels.create": { channel_id: string };
   "channels.list": ChannelSummary[];
+  "channels.members": ChannelMember[];
   "directory.contacts": ContactItem[];
   "directory.resolve": ResolveResult;
   "directory.listing_create": { id: string };
@@ -80,5 +82,9 @@ export const topics = {
   call: (callId: string) => `call:${callId}`,
   notify: (deviceId: string) => `notify:${deviceId}`,
   presence: (characterId: string) => `presence:${characterId}`,
-  feed: (appSlug: string) => `feed:${appSlug}`,
+  // The feed topic key IS the `app_id` (contract gap #9): Core has no separate
+  // "slug" concept — `feed:<app_id>` is the topic, and `app_id` is what
+  // `identity.me` exposes (accounts[].app_id / active_accounts keys). Subscribe
+  // with the same app_id you pass to `feed.*` commands.
+  feed: (appId: string) => `feed:${appId}`,
 } as const;

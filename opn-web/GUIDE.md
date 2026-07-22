@@ -211,7 +211,9 @@ socket.onTopic(topics.channel(channelId), (evt, payload) => { /* one channel */ 
 ```
 
 Topic kinds: `ch:<uuid>`, `call:<uuid>`, `notify:<device-uuid>`,
-`presence:<character-uuid>`, `feed:<app-slug>`.
+`presence:<character-uuid>`, `feed:<app-id>`. The feed topic key **is** the
+`app_id` — there is no separate "slug"; use `topics.feed(appId)` with the same
+`app_id` you pass to `feed.*` commands (it's in `identity.me`).
 
 Rules the backend holds you to:
 
@@ -311,7 +313,11 @@ socket.on("calls.group.state", (s) => renderRoster(s.participants));
 
 Render the roster from `calls.group.state` (Core's truth, synced from LiveKit
 webhooks), not from LiveKit participant events — that keeps your UI consistent
-with what the rest of the system believes.
+with what the rest of the system believes. The LiveKit participant `identity`
+is the joiner's **`character_id`**, so correlate SFU tracks / active-speaker
+events to `calls.group.state.participants[].character_id` by that equality.
+(It's character-granular: the same character can't join one room from two
+devices in v1 — LiveKit needs unique per-room identities.)
 
 ### 1:1 calls (P2P WebRTC)
 
@@ -320,6 +326,19 @@ with what the rest of the system believes.
 `RTCPeerConnection`) and `calls.signal` is an opaque relay for your SDP/ICE
 payloads. Core does not interpret them — the exchange format between the two
 ends is yours to define.
+
+**Incoming rings arrive as a `notify.event`, not an unsolicited `calls.state`.**
+Keep a standing `notify:<device>` sub; a ring is
+`{ app_id: "dialer", kind: "incoming_call", payload: { call_id, caller_number, video } }`.
+On `kind === "incoming_call"` read `payload.call_id`, then
+`socket.sub(topics.call(call_id))` — the sub ack is preceded by the `calls.state`
+snapshot. Core never pushes `calls.state` to a session not subscribed to that
+`call:<id>`, so ring off the notify event; don't wait for a snapshot.
+
+> `notify.event` is a live, ephemeral signal — a live push writes **no** inbox
+> row (and an inbox row is written only when you're offline), so it carries no
+> `id`/`created_at`. Treat it as a badge/toast trigger and reconcile the durable
+> list with `http.notifyInbox()` on open; the two are never the same row.
 
 ## 9. Media upload
 
@@ -340,6 +359,11 @@ await socket.cmd("media.commit", { media_id: ticket.media_id });
 Downloads: `http.media()` returns items whose `url`/`thumb_url` are
 short-lived presigned GETs — treat them as ephemeral, re-fetch the list rather
 than caching URLs.
+
+To render attachments **sent by others** — the `media_ids` on someone else's
+message or feed post, which never appear in your own gallery — resolve them by
+id with `http.mediaByIds(ids)` → `{ items }` (batch up to 100; missing/foreign
+ids are skipped, results follow request order).
 
 ## 10. Versioning
 

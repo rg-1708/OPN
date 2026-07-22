@@ -7,4 +7,21 @@
  * later-deleted media renders missing). `like_count`/`comment_count` are the
  * denormalized exact counters. Newest-first on the shared cursor idiom (CDR-7).
  */
-export type PostItem = { id: string, app_id: string, author_account: string, body: unknown, media_ids: string[], like_count: number, comment_count: number, created_at: string, };
+export type PostItem = { id: string, app_id: string, author_account: string, 
+/**
+ * The author's public handle (contract gap #8), denormalized at read time
+ * so a client renders a name instead of a truncated account uuid. Handles
+ * are already public within an app (`UNIQUE (world_id, app_id, handle)`).
+ */
+author_handle: string, body: unknown, media_ids: string[], like_count: number, comment_count: number, 
+/**
+ * Viewer-relative (contract gap #6): did the caller's active account for
+ * this app like this post — so the like button renders its true state after
+ * a reload. `false` when the caller isn't logged into the app.
+ */
+liked_by_viewer: boolean, 
+/**
+ * Viewer-relative (contract gap #6): does the caller's active account follow
+ * this post's author. `false` for own posts and when not logged in.
+ */
+author_following: boolean, created_at: string, };

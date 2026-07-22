@@ -48,6 +48,8 @@ pub fn class_of(cmd: &contracts::Cmd) -> Class {
         | Cmd::IdentityMe
         | Cmd::IdentityGetSettings { .. }
         | Cmd::ChannelsList
+        // Roster read: one indexed member scan (gap #3).
+        | Cmd::ChannelsMembers { .. }
         // Receipts are high-frequency, cheap watermark bumps — read-rate fits.
         | Cmd::ChannelsMarkDelivered { .. }
         | Cmd::ChannelsMarkRead { .. }
@@ -70,6 +72,8 @@ pub fn class_of(cmd: &contracts::Cmd) -> Class {
         | Cmd::ChannelsUnpin { .. }
         | Cmd::ChannelsMemberAdd { .. }
         | Cmd::ChannelsMemberRemove { .. }
+        // Mute toggle: occasional per-channel setting write.
+        | Cmd::ChannelsSetMuted { .. }
         // A commit is a cheap owner-scoped UPDATE; social-rate is plenty.
         | Cmd::MediaCommit { .. }
         // Directory writes: occasional contact/block/listing edits.

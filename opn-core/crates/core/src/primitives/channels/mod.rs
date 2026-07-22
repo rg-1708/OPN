@@ -5,7 +5,7 @@
 
 pub mod store;
 
-use contracts::types::{ChannelSummary, MessageBody, MessageItem, ReceiptKind};
+use contracts::types::{ChannelMember, ChannelSummary, MessageBody, MessageItem, ReceiptKind};
 use contracts::{ErrCode, Evt, NotifyClass};
 use serde_json::json;
 use time::OffsetDateTime;
@@ -179,6 +179,25 @@ pub async fn create(
 /// `channels.list` — the caller's memberships snapshot.
 pub async fn list(state: &AppState, who: &Identity) -> Result<Vec<ChannelSummary>, Fail> {
     store::list_memberships(&state.pg, who.world_id, who.character_id).await
+}
+
+/// `channels.members` (§10.2, gap #3): the roster of a channel the caller is in.
+pub async fn members(
+    state: &AppState,
+    who: &Identity,
+    channel_id: Uuid,
+) -> Result<Vec<ChannelMember>, Fail> {
+    store::channel_members(&state.pg, who.world_id, channel_id, who.character_id).await
+}
+
+/// `channels.set_muted` (§10.2, gap #3): set the caller's own mute flag.
+pub async fn set_muted(
+    state: &AppState,
+    who: &Identity,
+    channel_id: Uuid,
+    muted: bool,
+) -> Result<(), Fail> {
+    store::set_muted(&state.pg, who.world_id, channel_id, who.character_id, muted).await
 }
 
 /// `sub ch:<id>` authorization (§4.4): membership required.

@@ -48,6 +48,17 @@ export class OpnHttp {
     return this.get("/v1/media", opts);
   }
 
+  /**
+   * Resolve arbitrary media ids to presigned URLs (contract gap #1) — for
+   * rendering attachments sent by *others* (a message's/post's `media_ids`),
+   * which never appear in your own gallery. Missing/foreign/non-live ids are
+   * skipped; results follow the request order. Batch up to 100 ids per call.
+   */
+  mediaByIds(ids: string[]): Promise<{ items: MediaItem[] }> {
+    if (ids.length === 0) return Promise.resolve({ items: [] });
+    return this.get("/v1/media", { ids: ids.join(",") });
+  }
+
   ledgerHistory(opts: PageOpts = {}): Promise<Page<TransferItem>> {
     return this.get("/v1/ledger/history", opts);
   }

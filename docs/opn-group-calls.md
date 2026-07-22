@@ -65,6 +65,15 @@ group is a new primitive, not a rewrite.
   [contracts-semver.md](contracts-semver.md)).
 - Join ack payload: `{ sfu_url, token, expires_at }`. Token TTL short
   (≤60 s single-use window to connect; LiveKit session survives token expiry).
+- **LiveKit participant identity == `character_id`** (contract gap #12). Core
+  mints the access token's `sub` as the joiner's `character_id` (`group.rs`),
+  and the webhook sink parses that identity straight back as a character uuid to
+  keep the roster in sync — so the mapping is self-enforcing, not incidental. A
+  client correlates SFU tracks / active-speaker events with
+  `calls.group.state.participants[].character_id` by this equality. Note the
+  identity is **character**-granular, not per-device: the same character joining
+  from two devices mints the same LiveKit identity (LiveKit requires unique
+  per-room identities), so multi-device join to one room is not supported in v1.
 
 ### Persistence
 

@@ -147,6 +147,18 @@ pub async fn delete(
         sqlx::query(sql).bind(post_id).execute(&mut *tx).await?;
     }
     tx.commit().await?;
+    // Advise the feed so a live viewer drops the deleted post instead of
+    // rendering a stale row until its next page fetch (gap #7). Actor is the
+    // deleting owner's app account.
+    activity(
+        state,
+        who.world_id,
+        app_id,
+        FeedActivityKind::Delete,
+        post_id,
+        author,
+    )
+    .await;
     Ok(())
 }
 
@@ -216,19 +228,18 @@ pub async fn like(
     };
     tx.commit().await?;
 
-    if changed && add {
-        activity(
-            state,
-            who.world_id,
-            app_id,
-            FeedActivityKind::Like,
-            post_id,
-            account,
-        )
-        .await;
+    if changed {
+        // Advise on any real change — a like AND an unlike (gap #7) — so a live
+        // viewer can move the count both ways, not only up between reloads.
+        let kind = if add {
+            FeedActivityKind::Like
+        } else {
+            FeedActivityKind::Unlike
+        };
+        activity(state, who.world_id, app_id, kind, post_id, account).await;
         // Your-post-was-liked is a durable notify (§10.3), not the advisory
-        // event; skip self-likes.
-        if author_account != account {
+        // event; only on a real like, and skip self-likes.
+        if add && author_account != account {
             let n = Notification {
                 app_id: app_id.to_string(),
                 kind: "post_liked".into(),
@@ -409,6 +420,34 @@ async fn active_account(
     let raw = raw.ok_or(Fail::Code(ErrCode::Forbidden))?;
     raw.parse()
         .map_err(|_| Fail::Internal(anyhow::anyhow!("session active-account not a uuid")))
+}
+
+/// Like [`active_account`] but a missing app login is `Ok(None)`, not
+/// `Forbidden` (gap #6). Read paths that gate on membership (profile/detail/
+/// hashtag) still want the viewer's account, if any, to compute viewer-relative
+/// flags (`liked_by_viewer`, `author_following`) — a viewer not logged into the
+/// app simply gets `false` for both, never an error.
+async fn active_account_opt(
+    tx: &mut Transaction<'_, Postgres>,
+    session_id: Uuid,
+    app_id: &str,
+) -> Result<Option<Uuid>, Fail> {
+    if app_id.is_empty() || app_id.len() > APP_ID_MAX {
+        return Ok(None);
+    }
+    let raw: Option<String> =
+        sqlx::query_scalar("SELECT app_accounts ->> $1 FROM sessions WHERE id = $2")
+            .bind(app_id)
+            .bind(session_id)
+            .fetch_one(&mut **tx)
+            .await?;
+    match raw {
+        Some(s) => s
+            .parse()
+            .map(Some)
+            .map_err(|_| Fail::Internal(anyhow::anyhow!("session active-account not a uuid"))),
+        None => Ok(None),
+    }
 }
 
 /// Size gate for an opaque body doc (§10.3): Core caps, never interprets. A JSON

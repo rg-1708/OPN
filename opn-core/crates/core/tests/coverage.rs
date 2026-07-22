@@ -44,6 +44,8 @@ fn every_cmd_names_its_covering_test() {
             Cmd::ChannelsMemberRemove { .. } => {
                 "channels_members_resume::member_remove_drops_subscription"
             }
+            Cmd::ChannelsMembers { .. } => "channels_members_resume::members_roster_and_authz",
+            Cmd::ChannelsSetMuted { .. } => "channels_members_resume::set_muted_toggles_and_authz",
             Cmd::MediaRequestUpload { .. } => {
                 "media::request_upload_commit_roundtrip, media::caps_enforced"
             }
@@ -122,7 +124,7 @@ fn every_evt_names_its_covering_test() {
                  group_calls::webhook_participant_left_syncs_and_ends"
             }
             Evt::FeedActivity { .. } => {
-                "feed::like_and_comment_advise_feed (post/like/comment kinds), \
+                "feed::like_and_comment_advise_feed (post/like/unlike/comment/delete kinds), \
                  feed::post_creates_row_and_advises"
             }
         }

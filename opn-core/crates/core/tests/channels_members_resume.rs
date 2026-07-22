@@ -312,3 +312,123 @@ async fn resume_overflow_at_cap(admin: PgPool) {
     }
     assert_eq!(msgs, 500, "exactly 500 messages before overflow");
 }
+
+async fn members(c: &mut TestClient, channel_id: &str) -> Value {
+    c.cmd(json!({ "cmd": "channels.members", "payload": { "channel_id": channel_id } }))
+        .await
+}
+
+async fn set_muted(c: &mut TestClient, channel_id: &str, muted: bool) -> Value {
+    c.cmd(json!({ "cmd": "channels.set_muted", "payload": {
+        "channel_id": channel_id,
+        "muted": muted,
+    } }))
+    .await
+}
+
+async fn list(c: &mut TestClient) -> Value {
+    c.cmd(json!({ "cmd": "channels.list" })).await
+}
+
+/// Is `channel_id` present in a `channels.list` ack with `muted = true`.
+fn muted_in_list(ack: &Value, channel_id: &str) -> bool {
+    ack["payload"]
+        .as_array()
+        .expect("list array")
+        .iter()
+        .find(|s| s["channel_id"] == json!(channel_id))
+        .map(|s| s["muted"] == json!(true))
+        .unwrap_or(false)
+}
+
+// 5. `channels.members` returns the roster (character_id + joined_at) to a
+//    member and is forbidden to a non-member (gap #3).
+#[sqlx::test(migrator = "opn_core::MIGRATOR")]
+async fn members_roster_and_authz(admin: PgPool) {
+    let (world, tenant, _) = seed_world_tenant(&admin).await;
+    let app = app_pool(&admin, 16).await;
+    let (token_a, _a) = mint_full(&app, tenant, world, "a").await;
+    let (_token_b, b) = mint_full(&app, tenant, world, "b").await;
+    let (token_e, _e) = mint_full(&app, tenant, world, "e").await;
+    let server = spawn_server(test_state(app, test_config()).await).await;
+    let char_b = b.identity.character_id;
+
+    let mut ca = connect_and_auth(server.addr, &token_a).await;
+    let ack = ca
+        .cmd(json!({ "cmd": "channels.create", "payload": {
+            "name": "g",
+            "members": [char_b],
+        } }))
+        .await;
+    let group = cid(&ack);
+
+    // A member reads the roster: both A and B, each carrying a joined_at.
+    let ack = members(&mut ca, &group).await;
+    assert_eq!(ack["ok"], json!(true), "members: {ack}");
+    let roster = ack["payload"].as_array().expect("roster array");
+    assert_eq!(roster.len(), 2, "two members: {ack}");
+    let ids: Vec<&str> = roster
+        .iter()
+        .map(|m| m["character_id"].as_str().expect("character_id"))
+        .collect();
+    assert!(
+        ids.contains(&char_b.to_string().as_str()),
+        "B in roster: {ack}"
+    );
+    assert!(
+        roster.iter().all(|m| m["joined_at"].is_string()),
+        "joined_at present: {ack}"
+    );
+
+    // A non-member cannot read the roster → forbidden (no existence leak).
+    let mut ce = connect_and_auth(server.addr, &token_e).await;
+    let ack = members(&mut ce, &group).await;
+    assert_eq!(ack["err"]["code"], json!("forbidden"), "E members: {ack}");
+}
+
+// 6. `channels.set_muted` toggles the caller's own mute flag (reflected in
+//    channels.list), is idempotent, and is forbidden to a non-member (gap #3).
+#[sqlx::test(migrator = "opn_core::MIGRATOR")]
+async fn set_muted_toggles_and_authz(admin: PgPool) {
+    let (world, tenant, _) = seed_world_tenant(&admin).await;
+    let app = app_pool(&admin, 16).await;
+    let (token_a, _a) = mint_full(&app, tenant, world, "a").await;
+    let (_token_b, b) = mint_full(&app, tenant, world, "b").await;
+    let (token_e, _e) = mint_full(&app, tenant, world, "e").await;
+    let server = spawn_server(test_state(app, test_config()).await).await;
+
+    let mut ca = connect_and_auth(server.addr, &token_a).await;
+    let ack = ca
+        .cmd(json!({ "cmd": "channels.create", "payload": {
+            "name": "g",
+            "members": [b.identity.character_id],
+        } }))
+        .await;
+    let group = cid(&ack);
+
+    // Mute → the caller's list reflects it; re-muting is idempotent; unmute clears.
+    assert_eq!(set_muted(&mut ca, &group, true).await["ok"], json!(true), "mute");
+    assert!(muted_in_list(&list(&mut ca).await, &group), "muted after true");
+    assert_eq!(
+        set_muted(&mut ca, &group, true).await["ok"],
+        json!(true),
+        "mute idempotent"
+    );
+    assert_eq!(
+        set_muted(&mut ca, &group, false).await["ok"],
+        json!(true),
+        "unmute"
+    );
+    assert!(
+        !muted_in_list(&list(&mut ca).await, &group),
+        "unmuted after false"
+    );
+
+    // A non-member cannot mute the channel → forbidden.
+    let mut ce = connect_and_auth(server.addr, &token_e).await;
+    assert_eq!(
+        set_muted(&mut ce, &group, true).await["err"]["code"],
+        json!("forbidden"),
+        "E mute"
+    );
+}

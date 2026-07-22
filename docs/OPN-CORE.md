@@ -135,9 +135,13 @@ topics:    (world_id, topic) → SmallVec<session_id>
 ```
 
 - Topics are strings namespaced by primitive: `ch:<channel_id>`,
-  `feed:<world>`, `call:<call_id>`, `notify:<device_id>`,
-  `presence:<character_id>`. World id is part of the key — tenants can never
-  cross-subscribe by construction.
+  `feed:<app_id>`, `call:<call_id>`, `notify:<device_id>`,
+  `presence:<character_id>`. World id is part of the key (implicit — the
+  gateway scopes every subscription to the connection's world) — tenants can
+  never cross-subscribe by construction. Note `feed:<app_id>`: the topic tail
+  IS the `app_id` (`gateway/topic.rs` parses it verbatim; there is no separate
+  "slug"), and `app_id` is what `identity.me` exposes — so a client subscribes
+  `feed:<app_id>` with the same id it passes to `feed.*` commands.
 - **Presence is per-character, never world-wide** (a world topic would leak
   every player's online state to everyone). Apps sub `presence:<char>` for
   characters currently on screen (thread header, contacts list) — mount/
@@ -456,9 +460,11 @@ Commands: `feed.post`, `feed.delete`, `feed.like/unlike`, `feed.comment`,
 author_account, created_at)` index. Precomputed timelines are a
 100k-registered problem, not a 2k one (CDR-2).
 
-Events on `feed:<world>:<app>`: advisory only — `feed.activity
-{ kind: post|like|comment, post_id, actor }`. Clients refresh what they're
-looking at; notification of *your* post being liked routes through `notify`.
+Events on `feed:<app_id>`: advisory only — `feed.activity
+{ kind: post|like|unlike|comment|delete, post_id, actor }`. Clients refresh
+what they're looking at; `unlike`/`delete` (contract gap #7) let a live viewer
+move a count down or drop a removed post, not only ever count up between
+reloads. Notification of *your* post being liked routes through `notify`.
 
 Counters (`like_count`) are denormalized atomic `UPDATE … SET n = n + 1` in
 the same tx as the likes insert — cheap, exact, no drift.
@@ -620,6 +626,30 @@ route(recipient, notification) →
 - live session exists → push `notify.event` on `notify:<device_id>` (shell
   renders toast / badge; airplane-mode gating is client-side, OPN.md §5);
 - no live session → insert `inbox` row, read via HTTP on next login.
+
+The two branches are **mutually exclusive** (contract gap #5): a live push
+stores **no** `inbox` row, and an `inbox` row is written **only** when there is
+no live session — so `notify.event` deliberately carries no `id`/`created_at`
+(there is no stored row to reference, and nothing for `notify.seen` to mark).
+A live event is ephemeral-with-backpressure; the durable truth on reconnect is
+the channel watermark / `/calls/active` / the `inbox` page. Clients treat the
+live event as a badge/toast signal and reconcile with `GET /v1/notify/inbox` on
+open — do **not** expect a live event to correspond to an inbox row.
+
+**Ring delivery (contract gap #11):** a 1:1 call rings the callee through this
+same `notify` path, not an unsolicited `calls.state`. `calls.start` emits a
+`notify.event` with `app_id: "dialer"`, `kind: "incoming_call"`, `class: ring`,
+`payload: { call_id, caller_number, video }`. The callee holds a standing
+`notify:<device_id>` sub (subscribed on connect); on an `incoming_call` event it
+reads `payload.call_id`, then `sub call:<call_id>` — the sub ack is preceded by
+the `calls.state` snapshot. Core never pushes `calls.state` to a session that
+isn't subscribed to that `call:<id>`, so a client must ring off the
+`notify.event`, not wait for an unsolicited snapshot.
+
+`notify.event` payload shapes emitted by Core (the `kind` discriminates):
+`incoming_call` (calls) `{ call_id, caller_number, video }`; `message`
+(channels) `{ channel_id, message_id, seq }`; `post_liked` (feed)
+`{ post_id, actor }`.
 
 Commands: `notify.seen { ids }`, `notify.clear`.
 

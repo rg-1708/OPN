@@ -17,8 +17,12 @@ fn main() {
     // the TS SDK still types them.
     contracts::ChannelSummary::export_all_to(dir).expect("export ChannelSummary");
     contracts::InboxItem::export_all_to(dir).expect("export InboxItem");
-    // History rides HTTP, not the Cmd/Evt graph.
+    // History rides HTTP, not the Cmd/Evt graph (ReactionItem rides along as a
+    // dependency of MessageItem).
     contracts::MessageItem::export_all_to(dir).expect("export MessageItem");
+    // channels.members ack rides the WS ack as an opaque value, so export it
+    // explicitly for the TS SDK.
+    contracts::ChannelMember::export_all_to(dir).expect("export ChannelMember");
     // media: request_upload ack and the gallery row (UploadTarget rides along
     // as a dependency of UploadTicket).
     contracts::UploadTicket::export_all_to(dir).expect("export UploadTicket");

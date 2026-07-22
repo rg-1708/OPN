@@ -1,7 +1,9 @@
 //! channels SQL (OPN-CORE.md §8, §10.2). Flat `pub async fn`s over the pool;
 //! the handler layer in `mod.rs` does validation and post-commit fan-out.
 
-use contracts::types::{ChannelSummary, MessageItem, MessagePreview, ReceiptKind};
+use contracts::types::{
+    ChannelMember, ChannelSummary, MessageItem, MessagePreview, ReactionItem, ReceiptKind,
+};
 use contracts::ErrCode;
 use sqlx::PgPool;
 use time::OffsetDateTime;
@@ -271,6 +273,9 @@ struct SummaryRow {
     lm_body: Option<serde_json::Value>,
     lm_created_at: Option<OffsetDateTime>,
     peer_last_seen: Option<OffsetDateTime>,
+    peer_number: Option<String>,
+    peer_char: Option<Uuid>,
+    peer_spoke: Option<bool>,
 }
 
 /// The caller's memberships (§10.2): channel row + own watermarks + a
@@ -284,12 +289,22 @@ pub async fn list_memberships(
     character: Uuid,
 ) -> Result<Vec<ChannelSummary>, Fail> {
     let mut tx = world_tx(pool, world).await?;
+    // The dm peer lateral carries the peer's presence-gated last-seen, their
+    // number (gap #10), their character id, and whether they've spoken. The
+    // `peer_spoke` EXISTS gates the character id (gap #4): it's revealed only
+    // once the peer has emitted a message, so opening a DM to a number can't
+    // resolve that number to a character before the peer ever interacts (§10.7).
+    // ponytail: one EXISTS-on-messages per dm row; the list is bounded by the
+    // caller's channel count, so no index beyond messages_channel_seq is needed.
     let rows: Vec<SummaryRow> = sqlx::query_as(
         "SELECT c.id, c.kind, c.name, c.last_seq, \
                 m.last_read_seq, m.last_delivered_seq, m.muted, \
                 lm.seq AS lm_seq, lm.sender_character AS lm_sender, \
                 lm.body AS lm_body, lm.created_at AS lm_created_at, \
-                peer.last_seen AS peer_last_seen \
+                peer.last_seen AS peer_last_seen, \
+                peer.peer_number AS peer_number, \
+                peer.peer_char AS peer_char, \
+                peer.peer_spoke AS peer_spoke \
          FROM channel_members m \
          JOIN channels c ON c.id = m.channel_id \
          LEFT JOIN LATERAL ( \
@@ -297,7 +312,11 @@ pub async fn list_memberships(
              WHERE channel_id = c.id ORDER BY seq DESC LIMIT 1 \
          ) lm ON true \
          LEFT JOIN LATERAL ( \
-             SELECT CASE WHEN pc.share_presence THEN pc.last_seen_at END AS last_seen \
+             SELECT CASE WHEN pc.share_presence THEN pc.last_seen_at END AS last_seen, \
+                    pc.number AS peer_number, \
+                    pc.id AS peer_char, \
+                    EXISTS(SELECT 1 FROM messages pmsg \
+                           WHERE pmsg.channel_id = c.id AND pmsg.sender_character = pc.id) AS peer_spoke \
              FROM channel_members pm \
              JOIN characters pc ON pc.id = pm.character_id \
              WHERE c.kind = 'dm' AND pm.channel_id = c.id AND pm.character_id <> $1 \
@@ -330,8 +349,78 @@ pub async fn list_memberships(
                 _ => None,
             },
             last_seen_at: r.peer_last_seen.map(rfc3339),
+            // Only surface the peer's character id once they've spoken (gap #4).
+            peer_character_id: match (r.peer_spoke, r.peer_char) {
+                (Some(true), Some(id)) => Some(id),
+                _ => None,
+            },
+            peer_number: r.peer_number,
         })
         .collect())
+}
+
+/// `channels.members` (§10.2, gap #3): the roster for a channel the caller is in.
+/// Membership-gated (`Forbidden` for a non-member / RLS-hidden channel); returns
+/// character ids + join times only — never phone numbers (§10.7 boundary).
+pub async fn channel_members(
+    pool: &PgPool,
+    world: Uuid,
+    channel_id: Uuid,
+    caller: Uuid,
+) -> Result<Vec<ChannelMember>, Fail> {
+    let mut tx = world_tx(pool, world).await?;
+    let member: Option<i32> = sqlx::query_scalar(
+        "SELECT 1 FROM channel_members WHERE channel_id = $1 AND character_id = $2",
+    )
+    .bind(channel_id)
+    .bind(caller)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if member.is_none() {
+        return Err(Fail::Code(ErrCode::Forbidden));
+    }
+    let rows: Vec<(Uuid, OffsetDateTime)> = sqlx::query_as(
+        "SELECT character_id, joined_at FROM channel_members \
+         WHERE channel_id = $1 ORDER BY joined_at, character_id",
+    )
+    .bind(channel_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(character_id, joined_at)| ChannelMember {
+            character_id,
+            joined_at: rfc3339(joined_at),
+        })
+        .collect())
+}
+
+/// `channels.set_muted` (§10.2, gap #3): set the caller's own mute flag on a
+/// channel. Idempotent (re-setting the same value still matches the row);
+/// `Forbidden` when the caller isn't a member (no row updated).
+pub async fn set_muted(
+    pool: &PgPool,
+    world: Uuid,
+    channel_id: Uuid,
+    caller: Uuid,
+    muted: bool,
+) -> Result<(), Fail> {
+    let mut tx = world_tx(pool, world).await?;
+    let updated: Option<i32> = sqlx::query_scalar(
+        "UPDATE channel_members SET muted = $3 \
+         WHERE channel_id = $1 AND character_id = $2 RETURNING 1",
+    )
+    .bind(channel_id)
+    .bind(caller)
+    .bind(muted)
+    .fetch_optional(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    if updated.is_some() {
+        Ok(())
+    } else {
+        Err(Fail::Code(ErrCode::Forbidden))
+    }
 }
 
 /// `sub ch:<id>` authorization (§4.4): membership only. Non-member (and
@@ -645,8 +734,27 @@ impl From<MsgRow> for MessageItem {
             sender: r.sender_character,
             body: r.body,
             at: rfc3339(r.created_at),
+            // Resume replay re-pushes messages as live `channels.message` events,
+            // which carry no reaction/pin state (the client heals those from the
+            // live reaction/pin events); only the HTTP cold-load (`history`)
+            // populates them. Defaults keep this path unchanged.
+            pinned: false,
+            reactions: Vec::new(),
         }
     }
+}
+
+/// A history row enriched with the durable reaction/pin state a cold-load must
+/// carry (gap #2): `pinned` and the message's reactions aggregated as JSON.
+#[derive(sqlx::FromRow)]
+struct HistRow {
+    id: Uuid,
+    seq: i64,
+    sender_character: Uuid,
+    body: serde_json::Value,
+    created_at: OffsetDateTime,
+    pinned: bool,
+    reactions: serde_json::Value,
 }
 
 /// Resume replay (§4.4): messages after `after_seq`, ascending, capped. The
@@ -694,15 +802,40 @@ pub async fn history(
     if member.is_none() {
         return Err(Fail::Code(ErrCode::Forbidden));
     }
-    let rows: Vec<MsgRow> = sqlx::query_as(
-        "SELECT id, seq, sender_character, body, created_at FROM messages \
-         WHERE channel_id = $1 AND ($2::bigint IS NULL OR seq < $2) \
-         ORDER BY seq DESC LIMIT $3",
+    // Each row carries its pinned flag and reactions so a reload rebuilds the
+    // full message state (gap #2). Both are correlated subqueries per row — the
+    // page is capped at 100, so this is bounded work; `reactions_by_message`
+    // and the `channel_pins` PK index both serve these lookups.
+    let rows: Vec<HistRow> = sqlx::query_as(
+        "SELECT m.id, m.seq, m.sender_character, m.body, m.created_at, \
+                EXISTS(SELECT 1 FROM channel_pins cp \
+                       WHERE cp.channel_id = $1 AND cp.message_id = m.id) AS pinned, \
+                COALESCE((SELECT json_agg(json_build_object( \
+                            'emoji', r.emoji, 'character_id', r.character_id) \
+                            ORDER BY r.created_at) \
+                          FROM reactions r WHERE r.message_id = m.id), '[]'::json) AS reactions \
+         FROM messages m \
+         WHERE m.channel_id = $1 AND ($2::bigint IS NULL OR m.seq < $2) \
+         ORDER BY m.seq DESC LIMIT $3",
     )
     .bind(channel_id)
     .bind(before_seq)
     .bind(limit)
     .fetch_all(&mut *tx)
     .await?;
-    Ok(rows.into_iter().map(MessageItem::from).collect())
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        let reactions: Vec<ReactionItem> =
+            serde_json::from_value(r.reactions).map_err(|e| Fail::Internal(e.into()))?;
+        out.push(MessageItem {
+            message_id: r.id,
+            seq: r.seq,
+            sender: r.sender_character,
+            body: r.body,
+            at: rfc3339(r.created_at),
+            pinned: r.pinned,
+            reactions,
+        });
+    }
+    Ok(out)
 }

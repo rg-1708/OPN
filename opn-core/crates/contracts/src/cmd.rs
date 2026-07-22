@@ -140,6 +140,21 @@ pub enum Cmd {
         channel_id: Uuid,
         character_id: Uuid,
     },
+    /// List a channel's members (§10.2, contract gap #3). Membership-gated
+    /// (`forbidden` for a non-member). Ack `ChannelMember[]` ordered by
+    /// `joined_at` — character ids + join times only, never phone numbers.
+    #[serde(rename = "channels.members")]
+    ChannelsMembers {
+        channel_id: Uuid,
+    },
+    /// Set the caller's own mute flag on a channel (§10.2, contract gap #3).
+    /// Idempotent; `forbidden` if the caller isn't a member. Drives the notify
+    /// suppression split (a muted channel downgrades alerts to silent).
+    #[serde(rename = "channels.set_muted")]
+    ChannelsSetMuted {
+        channel_id: Uuid,
+        muted: bool,
+    },
 
     // ── media (§10.6) ────────────────────────────────────────────────────
     /// Request a presigned upload (§10.6): validates the kind/mime pair and the

@@ -543,14 +543,34 @@ async fn like_and_comment_advise_feed(admin: PgPool) {
         assert_eq!(e["payload"]["actor"], json!(acct.to_string()), "{e}");
     }
 
-    // Idempotent re-like → no advisory; delete → no advisory (activity kinds are
-    // post|like|comment only).
+    // Idempotent re-like → no advisory.
     assert_eq!(a.cmd(like).await["ok"], json!(true));
+
+    // Unlike is a real change → an `unlike` advisory (gap #7): a live viewer can
+    // move the count down, not only up.
+    let unlike = json!({ "cmd": "feed.unlike", "payload": { "app_id": APP, "post_id": post_id } });
+    assert_eq!(a.cmd(unlike.clone()).await["ok"], json!(true));
+    let e = w.expect_evt(EVT_WAIT).await;
+    assert_eq!(e["evt"], json!("feed.activity"), "unlike: {e}");
+    assert_eq!(e["payload"]["kind"], json!("unlike"), "{e}");
+    assert_eq!(e["payload"]["post_id"], json!(post_id), "{e}");
+    assert_eq!(e["payload"]["actor"], json!(acct.to_string()), "{e}");
+
+    // Idempotent re-unlike → no advisory.
+    assert_eq!(a.cmd(unlike).await["ok"], json!(true));
+
+    // Delete emits a `delete` advisory (gap #7) so a viewer drops the post.
     assert_eq!(
         a.cmd(json!({ "cmd": "feed.delete", "payload": { "app_id": APP, "post_id": post_id } }))
             .await["ok"],
         json!(true)
     );
+    let e = w.expect_evt(EVT_WAIT).await;
+    assert_eq!(e["evt"], json!("feed.activity"), "delete: {e}");
+    assert_eq!(e["payload"]["kind"], json!("delete"), "{e}");
+    assert_eq!(e["payload"]["post_id"], json!(post_id), "{e}");
+    assert_eq!(e["payload"]["actor"], json!(acct.to_string()), "{e}");
+
     w.expect_no_evt(Duration::from_millis(400)).await;
 }
 

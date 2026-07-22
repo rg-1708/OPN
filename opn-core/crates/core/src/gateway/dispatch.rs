@@ -289,6 +289,16 @@ async fn run(
             channels::member_change(state, who, channel_id, character_id, false).await?;
             Ok(None)
         }
+        Cmd::ChannelsMembers { channel_id } => {
+            let list = channels::members(state, who, channel_id).await?;
+            Ok(Some(
+                serde_json::to_value(list).map_err(anyhow::Error::from)?,
+            ))
+        }
+        Cmd::ChannelsSetMuted { channel_id, muted } => {
+            channels::set_muted(state, who, channel_id, muted).await?;
+            Ok(None)
+        }
 
         Cmd::MediaRequestUpload { kind, bytes, mime } => {
             let ticket = media::request_upload(state, who, kind, bytes, &mime).await?;
@@ -516,6 +526,8 @@ fn wire_name(cmd: &Cmd) -> &'static str {
         Cmd::ChannelsUnpin { .. } => "channels.unpin",
         Cmd::ChannelsMemberAdd { .. } => "channels.member_add",
         Cmd::ChannelsMemberRemove { .. } => "channels.member_remove",
+        Cmd::ChannelsMembers { .. } => "channels.members",
+        Cmd::ChannelsSetMuted { .. } => "channels.set_muted",
         Cmd::MediaRequestUpload { .. } => "media.request_upload",
         Cmd::MediaCommit { .. } => "media.commit",
         Cmd::DirectoryContactUpsert { .. } => "directory.contact_upsert",

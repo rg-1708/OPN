@@ -102,10 +102,39 @@ pub struct ChannelSummary {
     /// next list.
     #[ts(type = "string | null")]
     pub last_seen_at: Option<String>,
+    /// For `dm` channels: the peer's character id, so the client can subscribe
+    /// `presence:<id>` without waiting for the peer to emit traffic (contract
+    /// gap #4). `null` for groups AND for a DM where the peer has not yet
+    /// emitted a message — revealing it before then would let a caller map a
+    /// number to a character just by opening a DM, which the §10.7 number-opaque
+    /// model forbids. Once the peer has spoken their id is already observable in
+    /// every message they send, so this leaks nothing new.
+    #[ts(type = "string | null")]
+    pub peer_character_id: Option<Uuid>,
+    /// For `dm` channels: the peer's dialable number, so the DM header can render
+    /// call buttons after a reload (contract gap #10). `null` for groups (and for
+    /// a peer with no assigned number). Numbers are mutually known to DM parties
+    /// — the same number already rides the ring payload as caller-ID — so this
+    /// reveals nothing the directory keeps opaque.
+    #[ts(type = "string | null")]
+    pub peer_number: Option<String>,
+}
+
+/// One reaction on a history row (§10.2): the emoji and who reacted. Same
+/// granularity as the live `channels.reaction` event, so a cold-load rebuilds
+/// the exact same reaction map the live stream would.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ReactionItem {
+    pub emoji: String,
+    pub character_id: Uuid,
 }
 
 /// One message row in a `GET /v1/channels/:id/messages` history page (§6).
 /// Seq-keyed (not the time cursor) — seq is already public in this contract.
+/// `pinned` and `reactions` are the durable channel state a cold-load must
+/// carry so a reload doesn't lose reactions/pins that only existed as live
+/// events this session (contract gap #2).
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct MessageItem {
@@ -116,6 +145,22 @@ pub struct MessageItem {
     #[ts(type = "unknown")]
     pub body: serde_json::Value,
     pub at: String,
+    /// Is this message currently pinned in its channel (§10.2).
+    pub pinned: bool,
+    /// Every reaction on this message (§10.2), so the client renders reaction
+    /// state on a fresh load without replaying the live event stream.
+    pub reactions: Vec<ReactionItem>,
+}
+
+/// One member of a channel (`channels.members`, §10.2): character id + when they
+/// joined. Membership-gated read; carries no phone number (the §10.7 privacy
+/// boundary), only the character id a co-member already sees in every message,
+/// receipt, and `channels.member` event.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ChannelMember {
+    pub character_id: Uuid,
+    pub joined_at: String,
 }
 
 /// Which watermark a `channels.receipt` event carries (§10.2). `delivered` is
@@ -363,7 +408,14 @@ pub struct TransferItem {
 pub enum FeedActivityKind {
     Post,
     Like,
+    /// A like was removed (contract gap #7): lets a live viewer decrement its
+    /// optimistic `like_count` instead of only ever seeing it rise between
+    /// reloads. Additive kind; a client that doesn't know it just refreshes.
+    Unlike,
     Comment,
+    /// A post was deleted (contract gap #7): lets a live viewer drop the post
+    /// instead of rendering a stale row until the next page fetch.
+    Delete,
 }
 
 /// One post in a feed read page (home/profile/hashtag timelines, post detail;
@@ -377,6 +429,10 @@ pub struct PostItem {
     pub id: Uuid,
     pub app_id: String,
     pub author_account: Uuid,
+    /// The author's public handle (contract gap #8), denormalized at read time
+    /// so a client renders a name instead of a truncated account uuid. Handles
+    /// are already public within an app (`UNIQUE (world_id, app_id, handle)`).
+    pub author_handle: String,
     #[ts(type = "unknown")]
     pub body: serde_json::Value,
     #[ts(type = "string[]")]
@@ -385,6 +441,13 @@ pub struct PostItem {
     pub like_count: i64,
     #[ts(type = "number")]
     pub comment_count: i64,
+    /// Viewer-relative (contract gap #6): did the caller's active account for
+    /// this app like this post — so the like button renders its true state after
+    /// a reload. `false` when the caller isn't logged into the app.
+    pub liked_by_viewer: bool,
+    /// Viewer-relative (contract gap #6): does the caller's active account follow
+    /// this post's author. `false` for own posts and when not logged in.
+    pub author_following: bool,
     pub created_at: String,
 }
 
@@ -396,6 +459,9 @@ pub struct CommentItem {
     pub id: Uuid,
     pub post_id: Uuid,
     pub author_account: Uuid,
+    /// The comment author's public handle (contract gap #8), same rationale as
+    /// `PostItem::author_handle`.
+    pub author_handle: String,
     #[ts(type = "unknown")]
     pub body: serde_json::Value,
     pub created_at: String,

@@ -12,4 +12,22 @@ export type ChannelSummary = { channel_id: string, kind: string, name: string | 
  * (§10.2). Read-time honored, so a presence toggle takes effect on the
  * next list.
  */
-last_seen_at: string | null, };
+last_seen_at: string | null, 
+/**
+ * For `dm` channels: the peer's character id, so the client can subscribe
+ * `presence:<id>` without waiting for the peer to emit traffic (contract
+ * gap #4). `null` for groups AND for a DM where the peer has not yet
+ * emitted a message — revealing it before then would let a caller map a
+ * number to a character just by opening a DM, which the §10.7 number-opaque
+ * model forbids. Once the peer has spoken their id is already observable in
+ * every message they send, so this leaks nothing new.
+ */
+peer_character_id: string | null, 
+/**
+ * For `dm` channels: the peer's dialable number, so the DM header can render
+ * call buttons after a reload (contract gap #10). `null` for groups (and for
+ * a peer with no assigned number). Numbers are mutually known to DM parties
+ * — the same number already rides the ring payload as caller-ID — so this
+ * reveals nothing the directory keeps opaque.
+ */
+peer_number: string | null, };

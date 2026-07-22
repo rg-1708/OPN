@@ -17,7 +17,7 @@ use sqlx::{Postgres, Transaction};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use super::{active_account, APP_ID_MAX};
+use super::{active_account, active_account_opt, APP_ID_MAX};
 use crate::infra::auth::Identity;
 use crate::infra::cursor::{self, Cursor, Page};
 use crate::infra::db::world_tx;
@@ -28,6 +28,26 @@ use crate::state::AppState;
 /// Page-size ceiling for every feed read (matches the ledger/media reads).
 const LIMIT_MAX: i64 = 100;
 
+/// The viewer-relative columns every post read appends (gap #6 + #8): the
+/// author's public handle, plus whether the viewer account (`$V`) liked the post
+/// and follows its author. Kept as scalar/correlated subqueries in the SELECT
+/// list (never a FROM-clause JOIN) so the `posts_home` index still drives the
+/// scan and the 100 k EXPLAIN gate holds — they evaluate per output row, after
+/// LIMIT. `$V` is the viewer's app account (NULL ⇒ both flags false). Uses
+/// `p.world_id`/`p.app_id` so the fragment is bind-position-independent across
+/// the four queries; `concat!` keeps it a `&'static str`. Defined before
+/// `home_select!` because `macro_rules!` resolves textually top-down.
+macro_rules! viewer_cols {
+    ($v:literal) => {
+        concat!(
+            "COALESCE((SELECT au.handle FROM app_accounts au WHERE au.id = p.author_account), '') AS author_handle, ",
+            "EXISTS(SELECT 1 FROM likes l WHERE l.post_id = p.id AND l.account_id = ", $v, ") AS liked_by_viewer, ",
+            "EXISTS(SELECT 1 FROM follows fv WHERE fv.world_id = p.world_id AND fv.app_id = p.app_id ",
+            "AND fv.follower_account = ", $v, " AND fv.followee_account = p.author_account) AS author_following"
+        )
+    };
+}
+
 /// The home fan-out-on-read SELECT, as a macro so both the runtime query
 /// ([`HOME_SQL`]) and the EXPLAIN gate ([`HOME_SQL_EXPLAIN`], used by
 /// `tests/feed_read.rs`) derive from ONE literal — the plan test can never drift
@@ -35,16 +55,21 @@ const LIMIT_MAX: i64 = 100;
 /// `concat!` keeps both `&'static str`, so no dynamic-SQL escape hatch is needed.
 macro_rules! home_select {
     () => {
-        "SELECT p.id, p.app_id, p.author_account, p.body, p.media_ids, \
-                p.like_count, p.comment_count, p.created_at \
-         FROM posts p \
-         WHERE p.world_id = $1 AND p.app_id = $2 \
-           AND (p.author_account = $3 OR EXISTS ( \
-             SELECT 1 FROM follows f \
-             WHERE f.world_id = $1 AND f.app_id = $2 \
-               AND f.follower_account = $3 AND f.followee_account = p.author_account)) \
-           AND ($4::timestamptz IS NULL OR (p.created_at, p.id) < ($4, $5)) \
-         ORDER BY p.created_at DESC, p.id DESC LIMIT $6"
+        concat!(
+            "SELECT p.id, p.app_id, p.author_account, p.body, p.media_ids, ",
+            "p.like_count, p.comment_count, p.created_at, ",
+            // Viewer is the caller's active account, bound at $3 (same as the
+            // home filter) — no extra bind, so the EXPLAIN test's 6 binds hold.
+            viewer_cols!("$3"),
+            " FROM posts p ",
+            "WHERE p.world_id = $1 AND p.app_id = $2 ",
+            "AND (p.author_account = $3 OR EXISTS ( ",
+            "SELECT 1 FROM follows f ",
+            "WHERE f.world_id = $1 AND f.app_id = $2 ",
+            "AND f.follower_account = $3 AND f.followee_account = p.author_account)) ",
+            "AND ($4::timestamptz IS NULL OR (p.created_at, p.id) < ($4, $5)) ",
+            "ORDER BY p.created_at DESC, p.id DESC LIMIT $6"
+        )
     };
 }
 
@@ -60,10 +85,13 @@ struct PostRow {
     id: Uuid,
     app_id: String,
     author_account: Uuid,
+    author_handle: String,
     body: serde_json::Value,
     media_ids: Vec<Uuid>,
     like_count: i32,
     comment_count: i32,
+    liked_by_viewer: bool,
+    author_following: bool,
     created_at: OffsetDateTime,
 }
 
@@ -73,10 +101,13 @@ impl From<PostRow> for PostItem {
             id: r.id,
             app_id: r.app_id,
             author_account: r.author_account,
+            author_handle: r.author_handle,
             body: r.body,
             media_ids: r.media_ids,
             like_count: r.like_count as i64,
             comment_count: r.comment_count as i64,
+            liked_by_viewer: r.liked_by_viewer,
+            author_following: r.author_following,
             created_at: rfc3339(r.created_at),
         }
     }
@@ -87,6 +118,7 @@ struct CommentRow {
     id: Uuid,
     post_id: Uuid,
     author_account: Uuid,
+    author_handle: String,
     body: serde_json::Value,
     created_at: OffsetDateTime,
 }
@@ -97,6 +129,7 @@ impl From<CommentRow> for CommentItem {
             id: r.id,
             post_id: r.post_id,
             author_account: r.author_account,
+            author_handle: r.author_handle,
             body: r.body,
             created_at: rfc3339(r.created_at),
         }
@@ -178,20 +211,25 @@ pub async fn profile(
     let (cur_ts, cur_id) = cursor_binds(&cursor);
     let mut tx = world_tx(&state.pg, who.world_id).await?;
     require_app_member(&mut tx, who.character_id, app_id).await?;
-    let rows: Vec<PostRow> = sqlx::query_as(
-        "SELECT p.id, p.app_id, p.author_account, p.body, p.media_ids, \
-                p.like_count, p.comment_count, p.created_at \
-         FROM posts p \
-         WHERE p.world_id = $1 AND p.app_id = $2 AND p.author_account = $3 \
-           AND ($4::timestamptz IS NULL OR (p.created_at, p.id) < ($4, $5)) \
-         ORDER BY p.created_at DESC, p.id DESC LIMIT $6",
-    )
+    // Viewer account (if logged in) for the liked/following flags — $7, appended
+    // after the six positional binds this query already uses (gap #6).
+    let viewer = active_account_opt(&mut tx, who.session_id, app_id).await?;
+    let rows: Vec<PostRow> = sqlx::query_as(concat!(
+        "SELECT p.id, p.app_id, p.author_account, p.body, p.media_ids, ",
+        "p.like_count, p.comment_count, p.created_at, ",
+        viewer_cols!("$7"),
+        " FROM posts p ",
+        "WHERE p.world_id = $1 AND p.app_id = $2 AND p.author_account = $3 ",
+        "AND ($4::timestamptz IS NULL OR (p.created_at, p.id) < ($4, $5)) ",
+        "ORDER BY p.created_at DESC, p.id DESC LIMIT $6"
+    ))
     .bind(who.world_id)
     .bind(app_id)
     .bind(author)
     .bind(cur_ts)
     .bind(cur_id)
     .bind(limit as i64 + 1)
+    .bind(viewer)
     .fetch_all(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -214,21 +252,26 @@ pub async fn post_detail(
     let (cur_ts, cur_id) = cursor_binds(&cursor);
     let mut tx = world_tx(&state.pg, who.world_id).await?;
     require_app_member(&mut tx, who.character_id, app_id).await?;
-    let post: Option<PostRow> = sqlx::query_as(
-        "SELECT p.id, p.app_id, p.author_account, p.body, p.media_ids, \
-                p.like_count, p.comment_count, p.created_at \
-         FROM posts p WHERE p.id = $1 AND p.app_id = $2",
-    )
+    let viewer = active_account_opt(&mut tx, who.session_id, app_id).await?;
+    let post: Option<PostRow> = sqlx::query_as(concat!(
+        "SELECT p.id, p.app_id, p.author_account, p.body, p.media_ids, ",
+        "p.like_count, p.comment_count, p.created_at, ",
+        viewer_cols!("$3"),
+        " FROM posts p WHERE p.id = $1 AND p.app_id = $2"
+    ))
     .bind(post_id)
     .bind(app_id)
+    .bind(viewer)
     .fetch_optional(&mut *tx)
     .await?;
     let post: PostItem = post.ok_or(Fail::Code(ErrCode::NotFound))?.into();
     let rows: Vec<CommentRow> = sqlx::query_as(
-        "SELECT id, post_id, author_account, body, created_at FROM comments \
-         WHERE post_id = $1 \
-           AND ($2::timestamptz IS NULL OR (created_at, id) < ($2, $3)) \
-         ORDER BY created_at DESC, id DESC LIMIT $4",
+        "SELECT c.id, c.post_id, c.author_account, \
+                COALESCE((SELECT au.handle FROM app_accounts au WHERE au.id = c.author_account), '') AS author_handle, \
+                c.body, c.created_at FROM comments c \
+         WHERE c.post_id = $1 \
+           AND ($2::timestamptz IS NULL OR (c.created_at, c.id) < ($2, $3)) \
+         ORDER BY c.created_at DESC, c.id DESC LIMIT $4",
     )
     .bind(post_id)
     .bind(cur_ts)
@@ -264,20 +307,23 @@ pub async fn hashtag(
     let (cur_ts, cur_id) = cursor_binds(&cursor);
     let mut tx = world_tx(&state.pg, who.world_id).await?;
     require_app_member(&mut tx, who.character_id, app_id).await?;
-    let rows: Vec<PostRow> = sqlx::query_as(
-        "SELECT p.id, p.app_id, p.author_account, p.body, p.media_ids, \
-                p.like_count, p.comment_count, p.created_at \
-         FROM hashtags h JOIN posts p ON p.id = h.post_id \
-         WHERE h.world_id = $1 AND h.app_id = $2 AND h.tag = $3 \
-           AND ($4::timestamptz IS NULL OR (p.created_at, p.id) < ($4, $5)) \
-         ORDER BY p.created_at DESC, p.id DESC LIMIT $6",
-    )
+    let viewer = active_account_opt(&mut tx, who.session_id, app_id).await?;
+    let rows: Vec<PostRow> = sqlx::query_as(concat!(
+        "SELECT p.id, p.app_id, p.author_account, p.body, p.media_ids, ",
+        "p.like_count, p.comment_count, p.created_at, ",
+        viewer_cols!("$7"),
+        " FROM hashtags h JOIN posts p ON p.id = h.post_id ",
+        "WHERE h.world_id = $1 AND h.app_id = $2 AND h.tag = $3 ",
+        "AND ($4::timestamptz IS NULL OR (p.created_at, p.id) < ($4, $5)) ",
+        "ORDER BY p.created_at DESC, p.id DESC LIMIT $6"
+    ))
     .bind(who.world_id)
     .bind(app_id)
     .bind(&tag)
     .bind(cur_ts)
     .bind(cur_id)
     .bind(limit as i64 + 1)
+    .bind(viewer)
     .fetch_all(&mut *tx)
     .await?;
     tx.commit().await?;

@@ -4,4 +4,9 @@
  * One comment in a post-detail page (§10.3, Sprint 8 part B). `body` is opaque,
  * size-capped like a post; newest-first on the cursor idiom.
  */
-export type CommentItem = { id: string, post_id: string, author_account: string, body: unknown, created_at: string, };
+export type CommentItem = { id: string, post_id: string, author_account: string, 
+/**
+ * The comment author's public handle (contract gap #8), same rationale as
+ * `PostItem::author_handle`.
+ */
+author_handle: string, body: unknown, created_at: string, };

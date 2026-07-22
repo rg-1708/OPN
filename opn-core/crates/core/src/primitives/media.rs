@@ -239,33 +239,87 @@ pub async fn list(
     let paged = cursor::page(rows, limit, |r| (r.created_at, r.id));
     let mut items = Vec::with_capacity(paged.items.len());
     for r in paged.items {
-        let url = state
-            .s3
-            .presign_get(&state.s3.object_key(who.world_id, r.id, false))
-            .map_err(Fail::Internal)?;
-        let thumb_url = if r.has_thumb {
-            Some(
-                state
-                    .s3
-                    .presign_get(&state.s3.object_key(who.world_id, r.id, true))
-                    .map_err(Fail::Internal)?,
-            )
-        } else {
-            None
-        };
-        items.push(MediaItem {
-            media_id: r.id,
-            kind: parse_kind(&r.kind),
-            mime: r.mime,
-            bytes: r.bytes,
-            url,
-            thumb_url,
-            created_at: rfc3339(r.created_at),
-        });
+        items.push(media_item(state, who.world_id, r)?);
     }
     Ok(Page {
         items,
         next_cursor: paged.next_cursor,
+    })
+}
+
+/// Max ids resolvable in one `GET /v1/media?ids=` batch (gap #1). Bounds the
+/// presign work; a client with more attachments splits the request.
+const IDS_MAX: usize = 100;
+
+/// `GET /v1/media?ids=a,b,c` (§10.6, gap #1): resolve arbitrary live media ids to
+/// presigned GET URLs so a client can render attachments sent by OTHER people —
+/// a message's or post's `media_ids`, which never appear in the caller's own
+/// gallery. Authorized by world + live only: the ids are 128-bit unguessable
+/// bearer capabilities, learned solely by receiving the referencing message or
+/// post, and `MediaItem` exposes no owner identity, so a per-channel-membership
+/// check would add coupling for no real privacy gain (contract-gap review).
+/// Missing / foreign-world / non-live ids are silently skipped (RLS hides other
+/// worlds), so a partial set returns what it can. Output follows the request
+/// order; duplicate ids collapse.
+pub async fn list_by_ids(
+    state: &AppState,
+    who: &Identity,
+    ids: &[Uuid],
+) -> Result<Vec<MediaItem>, Fail> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    if ids.len() > IDS_MAX {
+        return Err(Fail::Code(ErrCode::TooLarge));
+    }
+    let mut tx = world_tx(&state.pg, who.world_id).await?;
+    let rows: Vec<MediaRow> = sqlx::query_as(
+        "SELECT id, kind, mime, bytes, has_thumb, created_at FROM media \
+         WHERE id = ANY($1) AND state = 'live'",
+    )
+    .bind(ids)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    // Preserve the caller's requested order (the `= ANY` scan returns rows
+    // unordered); a duplicate id resolves once.
+    let mut by_id: std::collections::HashMap<Uuid, MediaRow> =
+        rows.into_iter().map(|r| (r.id, r)).collect();
+    let mut items = Vec::with_capacity(by_id.len());
+    for id in ids {
+        if let Some(r) = by_id.remove(id) {
+            items.push(media_item(state, who.world_id, r)?);
+        }
+    }
+    Ok(items)
+}
+
+/// One `MediaItem` with fresh presigned GET URLs (original + thumb) for a row —
+/// the shared projection used by both the gallery page and the by-ids batch.
+fn media_item(state: &AppState, world: Uuid, r: MediaRow) -> Result<MediaItem, Fail> {
+    let url = state
+        .s3
+        .presign_get(&state.s3.object_key(world, r.id, false))
+        .map_err(Fail::Internal)?;
+    let thumb_url = if r.has_thumb {
+        Some(
+            state
+                .s3
+                .presign_get(&state.s3.object_key(world, r.id, true))
+                .map_err(Fail::Internal)?,
+        )
+    } else {
+        None
+    };
+    Ok(MediaItem {
+        media_id: r.id,
+        kind: parse_kind(&r.kind),
+        mime: r.mime,
+        bytes: r.bytes,
+        url,
+        thumb_url,
+        created_at: rfc3339(r.created_at),
     })
 }
 

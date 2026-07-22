@@ -16,10 +16,11 @@ pub use error::{ErrBody, ErrCode};
 pub use evt::{Evt, EvtClass};
 pub use types::{
     ActiveCall, AppAccountInfo, CallKind, CallParticipant, CallParticipantState, CallSessionState,
-    ChannelSummary, CharacterInfo, CommentItem, ContactItem, DeviceInfo, FeedActivityKind,
-    GroupJoinAck, InboxItem, LinkHello, ListingItem, MePayload, MediaItem, MediaKind, MessageBody,
-    MessageItem, MessagePreview, NotifyClass, PostItem, ReceiptKind, ResolveResult,
-    SessionMintResponse, Topology, TransferItem, UploadTarget, UploadTicket, VoiceAction,
+    ChannelMember, ChannelSummary, CharacterInfo, CommentItem, ContactItem, DeviceInfo,
+    FeedActivityKind, GroupJoinAck, InboxItem, LinkHello, ListingItem, MePayload, MediaItem,
+    MediaKind, MessageBody, MessageItem, MessagePreview, NotifyClass, PostItem, ReactionItem,
+    ReceiptKind, ResolveResult, SessionMintResponse, Topology, TransferItem, UploadTarget,
+    UploadTicket, VoiceAction,
 };
 
 /// This crate's version, embedded at compile time from `Cargo.toml`

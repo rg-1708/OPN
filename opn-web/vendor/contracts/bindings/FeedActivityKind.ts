@@ -5,4 +5,4 @@
  * comment. Clients viewing the feed refresh on any of these; the closed set
  * keeps the advisory typed rather than a free-form string.
  */
-export type FeedActivityKind = "post" | "like" | "comment";
+export type FeedActivityKind = "post" | "like" | "unlike" | "comment" | "delete";
